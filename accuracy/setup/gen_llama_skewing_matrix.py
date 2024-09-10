@@ -28,7 +28,7 @@ def main():
     print("Loading Model")
     print("Model Config: ", config)
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.float16
+        args.model, torch_dtype=torch.bfloat16
     ).to("cuda")
     print("Model Loaded")
     head_dim = model.model.layers[0].self_attn.head_dim
@@ -47,7 +47,7 @@ def main():
 
     generated_ids = model.generate(input_ids, max_new_tokens=1, min_new_tokens=1)
 
-    # print(tokenizer.batch_decode(generated_ids, skip_special_tokens=True))
+    print(tokenizer.batch_decode(generated_ids, skip_special_tokens=True))
 
     query_v = {}
     key_v = {}
@@ -63,7 +63,6 @@ def main():
         layer = int(name)
         query = query_v[name]
         key = key_v[name]
-        print(name, ": key shape: ", key.shape)
 
         for head in range(n_head):
             in_q = query[0, head]

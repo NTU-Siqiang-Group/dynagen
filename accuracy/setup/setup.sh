@@ -9,7 +9,6 @@ cd ../transformers/src/transformers/models
 mv llama/modeling_llama.py llama/modeling_llama_orig.py
 
 cd ${CWD}
-# cp ../src/yarn_embedding.py ../transformers/src/transformers/models/llama/
 # ========= InfiniGen ============
 
 # generate skewing matrices for llama
@@ -19,13 +18,13 @@ python gen_llama_skewing_matrix.py \
 
 
 
-# # # generate partial weight matrices for prediction
-# PARTIAL_RATIO=0.2
+# generate partial weight matrices for prediction
+PARTIAL_RATIO=0.2
 
-# # llama
-# python gen_partial_weight.py \
-#   --skewing_matrix_path "./skewing_matrix/${LLAMA_MODEL}" \
-#   --model "${LLAMA_PATH}" \
-#   --model_type "llama" \
-#   --partial_weight_ratio $PARTIAL_RATIO \
-#   --output "./weights"
+# llama
+python gen_partial_weight.py \
+  --skewing_matrix_path "./skewing_matrix/${LLAMA_MODEL}.pt" \
+  --model "${LLAMA_PATH}" \
+  --model_type "llama" \
+  --partial_weight_ratio $PARTIAL_RATIO \
+  --output "./weights"
