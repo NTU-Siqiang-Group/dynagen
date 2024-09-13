@@ -22,10 +22,10 @@ def process_init():
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         tokenizer.model_max_length = int(1e30)
         tokenizer.pad_token = "<|endoftext|>"
-    elif model_name == 'huggyllama/llama-7b':
+    elif model_name == 'THUDM/LongWriter-llama3.1-8b':
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         tokenizer.model_max_length = int(1e30)
-        tokenizer.pad_token = "<|endoftext|>"
+        tokenizer.pad_token = "<|end_of_text|>"
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         tokenizer.add_bos_token = False

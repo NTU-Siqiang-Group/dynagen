@@ -3,7 +3,7 @@
 shots=5
 # Prepare dataset
 echo "prepare dataset"
-for task in openbookqa; do
+for task in winogrande; do
   python -u generate_task_data.py \
   --output-file "results/${task}-${shots}.jsonl" \
   --task-name ${task} \
@@ -19,7 +19,7 @@ budget=0.2
 echo "Threshold (alpha) sweep"
 for alpha in 1 2 3 4 5 6 7 8 9; do
   echo alpha "${alpha}"
-  bash ours.sh winogrande "../setup/opt-model/opt-13b" "facebook/opt-13b" opt ${shots} ${partial} ${alpha} ${capacity} ${budget}
+  bash ours.sh winogrande ~/THUDM THUDM/LongWriter-llama3.1-8b llama ${shots} ${partial} ${alpha} ${capacity} ${budget}
 done
 
 # Partial weight sweep
@@ -30,6 +30,6 @@ budget=0.2
 echo "Partial weight ratio sweep"
 for partial in 0.1 0.2 0.4 0.6 0.8 1; do
   echo partial ratio "${partial}"
-  bash ours.sh winogrande "../setup/opt-model/opt-13b" "facebook/opt-13b" opt ${shots} ${partial} ${alpha} ${capacity} ${budget}
+  bash ours.sh winogrande ~/THUDM THUDM/LongWriter-llama3.1-8b llama ${shots} ${partial} ${alpha} ${capacity} ${budget}
 done
 
