@@ -8,9 +8,7 @@ from utils import *
 def process_options():
     parser = argparse.ArgumentParser(description="Generate partial weight")
     parser.add_argument("--our_model_path", default=None, help="our OPT model")
-    parser.add_argument(
-        "--skewing_matrix_path", default=None, help="path to skewing matrix"
-    )
+    parser.add_argument("--skewing_matrix_path", default=None, help="path to skewing matrix")
     parser.add_argument("--model", default="facebook/opt-6.7b", help="model")
     parser.add_argument("--model_type", default="opt", help="model arch (opt, llama)")
     parser.add_argument(
@@ -19,9 +17,7 @@ def process_options():
         default=0.1,
         help="Ours: partial weight ratio",
     )
-    parser.add_argument(
-        "--output", required=True, help="output directory to store result"
-    )
+    parser.add_argument("--output", required=True, help="output directory to store result")
     return parser
 
 
@@ -35,13 +31,9 @@ def main():
     set_symlink(args.model_type, fname)
 
     if args.our_model_path is not None:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.our_model_path, torch_dtype=torch.float16
-        ).cuda()
+        model = AutoModelForCausalLM.from_pretrained(args.our_model_path, torch_dtype=torch.float16).cuda()
     else:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model, torch_dtype=torch.float16
-        ).cuda()
+        model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float16).cuda()
 
     if args.skewing_matrix_path is not None:
         A = torch.load(args.skewing_matrix_path).to("cuda").to(torch.float16)
@@ -70,29 +62,22 @@ def main():
 
     print(tokenizer.batch_decode(generated_ids, skip_special_tokens=True))
 
-    basepath = (
-        args.output
-        + "/"
-        + os.path.basename(os.path.normpath(args.model))
-        + "_%s" % (args.partial_weight_ratio)
-    )
+    basepath = args.output + "/" + os.path.basename(os.path.normpath(args.model)) + "_%s" % (args.partial_weight_ratio)
     if not os.path.exists(basepath):
         os.system("mkdir -p %s" % (basepath))
 
     if args.model_type == "opt":
         for layer in range(len(model.model.decoder.layers)):
-            partial_weight = model.model.decoder.layers[
-                layer
-            ].self_attn.partial_weight_q
-            torch.save(
-                partial_weight, "%s/partial_weight_q_" % (basepath) + str(layer) + ".pt"
-            )
+            partial_weight = model.model.decoder.layers[layer].self_attn.partial_weight_q
+            torch.save(partial_weight, "%s/partial_weight_q_" % (basepath) + str(layer) + ".pt")
     elif args.model_type == "llama":
         for layer in range(len(model.model.layers)):
             partial_weight = model.model.layers[layer].self_attn.partial_weight_q
-            torch.save(
-                partial_weight, "%s/partial_weight_q_" % (basepath) + str(layer) + ".pt"
-            )
+            try:
+                os.remove("%s/partial_weight_q_" % (basepath) + str(layer) + ".pt")
+            except FileNotFoundError:
+                pass
+            torch.save(partial_weight, "%s/partial_weight_q_" % (basepath) + str(layer) + ".pt")
 
 
 if __name__ == "__main__":

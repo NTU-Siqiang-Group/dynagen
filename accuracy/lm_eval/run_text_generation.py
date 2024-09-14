@@ -100,7 +100,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--model_arch", type=str, default='llama')
-    parser.add_argument("--model_name", type=str, default='huggyllama/llama-13b')
+    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-2-7b-hf")
     parser.add_argument("--cache_dir", type=str, default='../../checkpoint/')
 
     parser.add_argument("--heavy_ratio", type=float, default=0.1)
@@ -145,7 +145,6 @@ def main():
     result = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
     print("################## Generated Context with Full Cache ###################")
     print(result)
-
 
     ######### Enable HH
     checkpoint = copy.deepcopy(model.state_dict())

@@ -3,6 +3,9 @@
 LLAMA_PATH="THUDM/LongWriter-llama3.1-8b"
 LLAMA_MODEL="LongWriter-llama3.1-8b"
 
+# LLAMA_PATH="meta-llama/Llama-2-7b-hf"
+# LLAMA_MODEL="Llama-2-7b-hf"
+
 CWD=${PWD}
 cd ../transformers/src/transformers/models
 
@@ -23,8 +26,8 @@ PARTIAL_RATIO=0.2
 
 # llama
 python gen_partial_weight.py \
-  --skewing_matrix_path "./skewing_matrix/${LLAMA_MODEL}.pt" \
   --model "${LLAMA_PATH}" \
   --model_type "llama" \
   --partial_weight_ratio $PARTIAL_RATIO \
-  --output "./weights"
+  --output "./weights" \
+  --skewing_matrix_path "./skewing_matrix/${LLAMA_MODEL}.pt" \

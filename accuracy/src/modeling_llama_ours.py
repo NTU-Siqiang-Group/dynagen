@@ -123,61 +123,6 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         )
 
 
-class LlamaLlama3ScalingRotaryEmbedding(LlamaRotaryEmbedding):
-    def __init__(
-        self,
-        dim,
-        max_position_embeddings=2048,
-        base=10000,
-        factor=1.0,
-        low_freq_factor=1.0,
-        high_freq_factor=4.0,
-        original_max_position_embeddings=8192,
-        device=None,
-    ):
-        self.factor = factor
-        self.low_freq_factor = low_freq_factor
-        self.high_freq_factor = high_freq_factor
-        self.original_max_position_embeddings = original_max_position_embeddings
-        super().__init__(dim, max_position_embeddings, base, device)
-
-    def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
-        t = torch.arange(
-            self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype
-        )
-
-        # Apply LLaMA3 specific scaling
-        low_freq_wavelen = self.original_max_position_embeddings / self.low_freq_factor
-        high_freq_wavelen = (
-            self.original_max_position_embeddings / self.high_freq_factor
-        )
-
-        wavelen = 2 * math.pi / self.inv_freq
-        inv_freq_scaled = torch.where(
-            wavelen > low_freq_wavelen, self.inv_freq / self.factor, self.inv_freq
-        )
-
-        smooth_factor = torch.clip(
-            (self.original_max_position_embeddings / wavelen - self.low_freq_factor)
-            / (self.high_freq_factor - self.low_freq_factor),
-            0.0,
-            1.0,
-        )
-        smoothed_inv_freq = (
-            1 - smooth_factor
-        ) * inv_freq_scaled / self.factor + smooth_factor * inv_freq_scaled
-        is_medium_freq = (wavelen >= high_freq_wavelen) & (wavelen <= low_freq_wavelen)
-        inv_freq_scaled = torch.where(
-            is_medium_freq, smoothed_inv_freq, inv_freq_scaled
-        )
-
-        freqs = torch.einsum("i,j->ij", t, inv_freq_scaled)
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
-
-
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -220,9 +165,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_key_value_heads, n_rep, slen, head_dim
-    )
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
@@ -238,7 +181,6 @@ class LlamaAttention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -249,31 +191,11 @@ class LlamaAttention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-        if self.config.rope_scaling is None:
-            self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
-        else:
-            scaling_type = self.config.rope_scaling.get(
-                "rope_type", self.config.rope_scaling.get("type")
-            )
-            scaling_factor = self.config.rope_scaling["factor"]
-            if scaling_type == "llama3":
-                self.rotary_emb = LlamaLlama3ScalingRotaryEmbedding(
-                    self.head_dim,
-                    max_position_embeddings=self.max_position_embeddings,
-                    base=self.rope_theta,
-                    factor=scaling_factor,
-                    low_freq_factor=self.config.rope_scaling["low_freq_factor"],
-                    high_freq_factor=self.config.rope_scaling["high_freq_factor"],
-                    original_max_position_embeddings=self.config.rope_scaling[
-                        "original_max_position_embeddings"
-                    ],
-                )
-            else:
-                raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
+        self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
         self.attn = None
 
         self.layer_idx = layer_idx
-        
+
         #### InfiniGen Hyperparams ####
         self.cache_ratio = None
         self.partial_weight_ratio = None
@@ -288,7 +210,6 @@ class LlamaAttention(nn.Module):
         self.density = None
         ###############################
 
-
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
@@ -299,36 +220,40 @@ class LlamaAttention(nn.Module):
         assert self.budget < self.capacity
 
         b, h, tgt_len, src_len = attn.shape
-        attn = attn.view(b*h, tgt_len, src_len)
+        attn = attn.view(b * h, tgt_len, src_len)
         heads = b * h
 
         attn_mask = torch.full(attn.shape, -10000, dtype=attn.dtype, device=attn.device)
-        attn_mask = torch.triu(attn_mask, diagonal = 1)
+        attn_mask = torch.triu(attn_mask, diagonal=1)
         fetch_mask = torch.zeros_like(attn)
         m_inf = torch.tensor([[-10000]], dtype=attn.dtype, device=attn.device)
         attn = attn + attn_mask
         del attn_mask
-        
-        max = torch.max(attn, dim = -1, keepdim = True)[0][0]
+
+        max = torch.max(attn, dim=-1, keepdim=True)[0][0]
         threshold = max - self.alpha
-        fetch_num  = (attn >= threshold).sum(dim = -1) #heads, tgt_len
+        fetch_num = (attn >= threshold).sum(dim=-1)  # heads, tgt_len
         del threshold
 
-        fetch_num = torch.mean(fetch_num.to(attn.dtype), dim = 0).to(torch.int32) # need to fetch same amount for each head
+        fetch_num = torch.mean(fetch_num.to(attn.dtype), dim=0).to(
+            torch.int32
+        )  # need to fetch same amount for each head
         fetch_max = int(src_len * self.budget)
-        fetch_num = torch.where(fetch_num >= fetch_max, fetch_max, fetch_num) # tgt_len
+        fetch_num = torch.where(fetch_num >= fetch_max, fetch_max, fetch_num)  # tgt_len
 
         store_max = int(src_len * self.capacity)
 
-        fetch_mask[:, :fetch_max] = torch.tril(torch.ones((fetch_max, src_len), dtype = attn.dtype, device = attn.device)).unsqueeze(0)
+        fetch_mask[:, :fetch_max] = torch.tril(
+            torch.ones((fetch_max, src_len), dtype=attn.dtype, device=attn.device)
+        ).unsqueeze(0)
 
         for i in range(fetch_max, store_max):
-            _, ind = torch.topk(attn[:,i, :i+1], k = fetch_num[i], dim = -1)
-            fetch_mask[:, i, :i+1] = fetch_mask[:, i, :i + 1].scatter(-1, ind, 1)
+            _, ind = torch.topk(attn[:, i, : i + 1], k=fetch_num[i], dim=-1)
+            fetch_mask[:, i, : i + 1] = fetch_mask[:, i, : i + 1].scatter(-1, ind, 1)
 
         for i in range(store_max, tgt_len):
-            _, ind = torch.topk(attn[:,i, :i+1], k = fetch_num[i], dim = -1)
-            fetch_mask[:, i, :i + 1] = fetch_mask[:, i, :i + 1].scatter(-1, ind, 1)
+            _, ind = torch.topk(attn[:, i, : i + 1], k=fetch_num[i], dim=-1)
+            fetch_mask[:, i, : i + 1] = fetch_mask[:, i, : i + 1].scatter(-1, ind, 1)
 
             if i == (tgt_len - 1):
                 continue
@@ -336,22 +261,22 @@ class LlamaAttention(nn.Module):
             # Before adding KV cache, evict one
             if self.eviction_policy == "fifo":
                 evict_idx = i - store_max
-                attn[:, (i + 1):, evict_idx] = -10000
+                attn[:, (i + 1) :, evict_idx] = -10000
 
             elif self.eviction_policy == "lru":
-                idx = torch.arange(i + 1, device = attn.device).unsqueeze(0).unsqueeze(-1)
-                idx = idx * fetch_mask[:, :i + 1, :int(i / 2)] # avoid evicting recently added ones
+                idx = torch.arange(i + 1, device=attn.device).unsqueeze(0).unsqueeze(-1)
+                idx = idx * fetch_mask[:, : i + 1, : int(i / 2)]  # avoid evicting recently added ones
                 # Most recently fetched idx per each KV cache
-                _, idx = torch.max(idx, dim = 1, keepdim = True) # heads, 1, i/2
-                _, ind = torch.min(idx, dim = -1, keepdim = True) # heads, 1, 1
+                _, idx = torch.max(idx, dim=1, keepdim=True)  # heads, 1, i/2
+                _, ind = torch.min(idx, dim=-1, keepdim=True)  # heads, 1, 1
                 ind = ind.repeat(1, tgt_len - (i + 1), 1)
-                attn[:, (i + 1):] = attn[:, (i + 1):].scatter(-1, ind, -10000)
+                attn[:, (i + 1) :] = attn[:, (i + 1) :].scatter(-1, ind, -10000)
 
             elif self.eviction_policy == "counter":
-                counter = torch.sum(fetch_mask[:, :i + 1, :int(i / 2)], dim = 1, keepdim = True) #heads, 1, i/2
-                _, ind = torch.min(counter, dim = -1, keepdim = True) #heads, 1, 1
-                ind = ind.repeat(1,tgt_len-(i+1),1)
-                attn[:, (i + 1):] = attn[:, (i + 1):].scatter(-1, ind, -10000)
+                counter = torch.sum(fetch_mask[:, : i + 1, : int(i / 2)], dim=1, keepdim=True)  # heads, 1, i/2
+                _, ind = torch.min(counter, dim=-1, keepdim=True)  # heads, 1, 1
+                ind = ind.repeat(1, tgt_len - (i + 1), 1)
+                attn[:, (i + 1) :] = attn[:, (i + 1) :].scatter(-1, ind, -10000)
 
             else:
                 raise NotImplementedError
@@ -360,7 +285,7 @@ class LlamaAttention(nn.Module):
         fetch_mask = torch.where(fetch_mask == 1, 0, m_inf)
         fetch_mask = fetch_mask.view(b, h, tgt_len, src_len)
         return fetch_mask, density
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -373,12 +298,15 @@ class LlamaAttention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
         self.current_hidden_states = hidden_states.clone()
 
-        
         ### Ours  ###########################################
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        
-        key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        key_states = (
+            self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        )
+        value_states = (
+            self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        )
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
@@ -396,24 +324,29 @@ class LlamaAttention(nn.Module):
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
-        
+
         ### Speculate attention ###
         if (self.previous_hidden_states is not None) and (self.partial_weight_q is not None):
-            query = (torch.matmul(self.previous_hidden_states, self.q_proj.weight.data.transpose(-1,-2))).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+            query = (
+                (torch.matmul(self.previous_hidden_states, self.q_proj.weight.data.transpose(-1, -2)))
+                .view(bsz, q_len, self.num_heads, self.head_dim)
+                .transpose(1, 2)
+            )
             query, _ = apply_rotary_pos_emb(query, key_states, cos, sin, position_ids)
-            skewing_matrix = repeat_kv(self.skewing_matrix.unsqueeze(0), self.num_key_value_groups)
-            query = query @ skewing_matrix
-            mask = self.partial_weight_q[0].view(-1,128).unsqueeze(0).unsqueeze(2).repeat(1,1,query_states.shape[2], 1)
+            query = query @ self.skewing_matrix.unsqueeze(0)
+            mask = (
+                self.partial_weight_q[0].view(-1, 128).unsqueeze(0).unsqueeze(2).repeat(1, 1, query_states.shape[2], 1)
+            )
             query = torch.where(mask.to(torch.bool), query, torch.zeros_like(query))
 
-            attn = torch.matmul(query, (key_states @ skewing_matrix).transpose(2, 3))/math.sqrt(self.head_dim)
+            attn = torch.matmul(query, (key_states @ self.skewing_matrix).transpose(2, 3)) / math.sqrt(self.head_dim)
 
             attn_mask, density = self.kv_cache_mask(attn)
             self.density = density
         ###########################
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-        
+
         ### Apply mask ###
         if (self.previous_hidden_states is not None) and (self.partial_weight_q is not None):
             attn_weights = attn_weights + attn_mask
@@ -761,7 +694,7 @@ class LlamaModel(LlamaPreTrainedModel):
         next_decoder_cache = () if use_cache else None
 
         for idx, decoder_layer in enumerate(self.layers):
-            #print(idx)
+            # print(idx)
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -792,24 +725,26 @@ class LlamaModel(LlamaPreTrainedModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                 )
-                
+
                 #### OURS ####
                 ## Passing previous hidden states
                 ## i - 1
-                if (idx > 0) and (idx < (len(self.layers)-1)):
-                    self.layers[idx + 1].self_attn.previous_hidden_states = self.layers[idx].self_attn.current_hidden_states
-                
+                if (idx > 0) and (idx < (len(self.layers) - 1)):
+                    self.layers[idx + 1].self_attn.previous_hidden_states = self.layers[
+                        idx
+                    ].self_attn.current_hidden_states
+
                 ## i - 2
-                #if (idx == 1):
+                # if (idx == 1):
                 #    self.layers[idx + 1].self_attn.previous_hidden_states = self.layers[idx].self_attn.current_hidden_states
-                #if (idx > 0) and (idx < (len(self.layers)-2)):
+                # if (idx > 0) and (idx < (len(self.layers)-2)):
                 #    self.layers[idx + 2].self_attn.previous_hidden_states = self.layers[idx].self_attn.current_hidden_states
-                
+
                 ## i - 3
-                #if (idx == 1):
+                # if (idx == 1):
                 #    self.layers[idx + 1].self_attn.previous_hidden_states = self.layers[idx].self_attn.current_hidden_states
                 #    self.layers[idx + 2].self_attn.previous_hidden_states = self.layers[idx].self_attn.current_hidden_states
-                #if (idx > 0) and (idx < (len(self.layers)-3)):
+                # if (idx > 0) and (idx < (len(self.layers)-3)):
                 #    self.layers[idx + 3].self_attn.previous_hidden_states = self.layers[idx].self_attn.current_hidden_states
                 ##############
 
@@ -839,8 +774,6 @@ class LlamaModel(LlamaPreTrainedModel):
 
 
 class LlamaForCausalLM(LlamaPreTrainedModel):
-    _tied_weights_keys = ["lm_head.weight"]
-
     def __init__(self, config):
         super().__init__(config)
         self.model = LlamaModel(config)

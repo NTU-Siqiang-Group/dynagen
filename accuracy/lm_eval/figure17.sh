@@ -1,5 +1,8 @@
 #!/bin/bash
 
+LLAMA_PATH="THUDM/LongWriter-llama3.1-8b"
+# LLAMA_PATH="meta-llama/Llama-2-7b-hf"
+
 shots=5
 # Prepare dataset
 echo "prepare dataset"
@@ -18,18 +21,19 @@ budget=0.2
 
 echo "Threshold (alpha) sweep"
 for alpha in 1 2 3 4 5 6 7 8 9; do
+# for alpha in 6 8; do
   echo alpha "${alpha}"
-  bash ours.sh winogrande ~/THUDM THUDM/LongWriter-llama3.1-8b llama ${shots} ${partial} ${alpha} ${capacity} ${budget}
+  bash ours.sh winogrande ${LLAMA_PATH} ${LLAMA_PATH} llama ${shots} ${partial} ${alpha} ${capacity} ${budget}
 done
 
-# Partial weight sweep
-alpha=4
-capacity=1.0
-budget=0.2
+# # Partial weight sweep
+# alpha=4
+# capacity=1.0
+# budget=0.2
 
-echo "Partial weight ratio sweep"
-for partial in 0.1 0.2 0.4 0.6 0.8 1; do
-  echo partial ratio "${partial}"
-  bash ours.sh winogrande ~/THUDM THUDM/LongWriter-llama3.1-8b llama ${shots} ${partial} ${alpha} ${capacity} ${budget}
-done
+# echo "Partial weight ratio sweep"
+# for partial in 0.1 0.2 0.4 0.6 0.8 1; do
+#   echo partial ratio "${partial}"
+#   bash ours.sh winogrande ${LLAMA_PATH} ${LLAMA_PATH} llama ${shots} ${partial} ${alpha} ${capacity} ${budget}
+# done
 

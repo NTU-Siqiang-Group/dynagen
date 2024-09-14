@@ -14,33 +14,39 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 tokenizer = None
 
+
 def process_init():
     global tokenizer
-    model_name = os.environ.get('MODEL_NAME', 'facebook/opt-1.3b')
+    model_name = os.environ.get("MODEL_NAME", "facebook/opt-1.3b")
 
     if model_name == "EleutherAI/gpt-neox-20b":
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         tokenizer.model_max_length = int(1e30)
         tokenizer.pad_token = "<|endoftext|>"
-    elif model_name == 'THUDM/LongWriter-llama3.1-8b':
+    elif model_name == "THUDM/LongWriter-llama3.1-8b":
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         tokenizer.model_max_length = int(1e30)
         tokenizer.pad_token = "<|end_of_text|>"
+    elif model_name == "meta-llama/Llama-2-7b-hf":
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer.model_max_length = int(1e30)
+        tokenizer.pad_token = "<|endoftext|>"
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         tokenizer.add_bos_token = False
+
 
 def process_request(x, seq):
     global tokenizer
 
     ctx, cont = x
-#     ctx_tokens = tokenizer.encode("<|endoftext|>" + ftfy.fix_text(ctx, normalization="NFKC"))
+    #     ctx_tokens = tokenizer.encode("<|endoftext|>" + ftfy.fix_text(ctx, normalization="NFKC"))
     ctx_text = ftfy.fix_text(ctx, normalization="NFKC")
     cont_text = ftfy.fix_text(cont, normalization="NFKC")
     all_text = ctx_text + cont_text
 
-    ctx_tokens = tokenizer(ctx_text, add_special_tokens=False)['input_ids']
-    cont_tokens = tokenizer(cont_text, add_special_tokens=False)['input_ids']
+    ctx_tokens = tokenizer(ctx_text, add_special_tokens=False)["input_ids"]
+    cont_tokens = tokenizer(cont_text, add_special_tokens=False)["input_ids"]
 
     all_tokens = ctx_tokens + cont_tokens
     all_tokens = np.array(all_tokens)[-seq:]  # truncate sequence at seq length
@@ -53,8 +59,7 @@ def process_request(x, seq):
         "target": np.pad(all_tokens[1:], ((0, pad_amount),), constant_values=tokenizer.pad_token_id),
         "ctx_length": seq,
         "eval_mask": np.logical_and(
-            np.arange(0, seq) > len(all_tokens) - len(cont_tokens) - 2,
-            np.arange(0, seq) < len(all_tokens) - 1
+            np.arange(0, seq) > len(all_tokens) - len(cont_tokens) - 2, np.arange(0, seq) < len(all_tokens) - 1
         ),
         "prompt": ctx_text,
         "target": cont_text,
@@ -90,9 +95,9 @@ class EvalHarnessAdaptor(LM):
         r = self.convert_requests(requests)
         zero_example = process_request(requests[0], self.seq)
 
-        for b in tqdm(sample_batch(r, self.batch, zero_example),
-                      desc="LM eval harness",
-                      total=len(requests) // self.batch):
+        for b in tqdm(
+            sample_batch(r, self.batch, zero_example), desc="LM eval harness", total=len(requests) // self.batch
+        ):
 
             if self.shrink:
                 b = shrink_seq(b, min_seq=self.min_seq)
@@ -103,5 +108,3 @@ class EvalHarnessAdaptor(LM):
                 output.append((float(-loss), bool(correct)))
 
         return output
-
-

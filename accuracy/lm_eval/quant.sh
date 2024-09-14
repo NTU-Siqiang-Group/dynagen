@@ -21,6 +21,7 @@ python -u evaluate_task_result.py \
   --result-file results/${task}-${shots}-${base_name}-quant.jsonl \
   --task-name ${task} \
   --num-fewshot ${shots} \
+  --model-name ${model} \
   --model-type ${model_arch}
 
 rm results/${task}-${shots}-${base_name}-quant.jsonl
