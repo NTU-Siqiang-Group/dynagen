@@ -27,4 +27,13 @@ do
     CMD=$CMD" --max-num-kv 409 --hh-ratio 0.1 --hh-all"
   fi
   python -u $FLEXGEN_PATH/flexgen/run_lm_eval_harness.py $CMD
+
+  # Evaluate results
+  python -u $FLEXGEN_PATH/../../accuracy/lm_eval/evaluate_task_result.py \
+    --result-file $FLEXGEN_PATH/flexgen/results/${task}-${shots}-${model}-${SCHEME}.jsonl \
+    --task-name ${task} \
+    --num-fewshot ${shots} \
+    --model-name facebook/${model}
+  
+  # rm $FLEXGEN_PATH/flexgen/results/${task}-${shots}-${model}-${SCHEME}.jsonl
 done
