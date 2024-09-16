@@ -5,3 +5,4 @@ __pycache__
 *.jsonl
 .vscode/
 accuracy/transformers/
+*.egg-info/

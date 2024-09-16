@@ -261,7 +261,7 @@ class OutputEmbed:
             (w_ln, _), (b_ln, _), (w_token, _) = weight_read_buf.val
 
         h = self.compute.opt_output_embed(h, w_ln, b_ln, w_token, donate,
-            self.task.do_sample, self.task.temperature)
+            self.task.do_sample, self.task.temperature, self.task.evaluate)
         hidden.val = h
 
 
@@ -970,7 +970,11 @@ class OptLM:
                  debug_mode: Optional[str] = None,
                  cut_gen_len: Optional[int] = None,
                  verbose: int = 0,
-                 warmup: bool = False):
+                 warmup: bool = False,
+                 evaluate: bool = False):
+        if evaluate:
+            assert max_new_tokens == 1 and self.num_gpu_batches == 1 and self.policy.gpu_batch_size == 1
+
         task = Task(
             inputs=inputs,
             prompt_len=len(inputs[0]),
@@ -979,6 +983,7 @@ class OptLM:
             do_sample=do_sample,
             temperature=temperature,
             stop=stop,
+            evaluate=evaluate,
         )
         num_layers = self.num_layers
         num_gpu_batches = self.num_gpu_batches
@@ -1028,7 +1033,7 @@ class OptLM:
             else:
                 # Overlap I/O and compute
                 if num_gpu_batches == 1:
-                    self.generation_loop_overlap_single_batch()
+                    self.generation_loop_overlap_single_batch(evaluate)
                 else:
                     self.generation_loop_overlap_multi_batch()
         elif debug_mode == "fewer_batch":
@@ -1049,6 +1054,9 @@ class OptLM:
                 self.delete_cache(j, k)
         if self.policy.cpu_cache_compute:
             self.env.cpu.del_attention_compute_workspace()
+
+        if evaluate:
+            return self.hidden[0][-1][0].val.data.detach().cpu()
 
         return self.output_ids
 
@@ -1157,7 +1165,7 @@ class OptLM:
                 costs = timers(name).costs
                 print(f"{name:22s} (per-batch): {np.mean(costs):.6f} s")
 
-    def generation_loop_overlap_single_batch(self):
+    def generation_loop_overlap_single_batch(self, evaluate):
         # Prologue
         for k in range(self.num_gpu_batches):
             self.load_weight(0, 0, k)
@@ -1172,6 +1180,9 @@ class OptLM:
                 self.load_cache(i, j+1, 0)
                 self.load_hidden(i, j, 0)
                 self.compute_layer(i, j, 0)
+                if evaluate and j == self.num_layers - 1:
+                    self.sync()
+                    break
                 self.store_cache(i, j-1, 0)
                 self.store_hidden(i, j, 0)
                 self.sync()

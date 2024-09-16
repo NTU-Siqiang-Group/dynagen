@@ -280,7 +280,7 @@ class TorchDevice:
         return TorchTensor.create_from_torch(data, self)
 
     def opt_output_embed(self, inputs, w_ln, b_ln, w_token, donate,
-                         do_sample, temperature):
+                         do_sample, temperature, evaluate):
         # decompress weights
         if w_token.device.device_type == DeviceType.COMPRESSED:
             w_token = w_token.device.decompress(w_token)
@@ -293,6 +293,9 @@ class TorchDevice:
         # output embedding
         logits = F.linear(hidden, w_token.data)
         last_token_logits = logits[:,-1,:]
+
+        if evaluate:
+            return TorchTensor.create_from_torch(logits, self)
 
         if do_sample and not temperature < 1e-5:
             probs = torch.softmax(last_token_logits / temperature, dim=-1)
