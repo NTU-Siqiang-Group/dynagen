@@ -11,6 +11,8 @@ no_skewing=${9}
 FLEXGEN_PATH=$PWD/../flexgen
 for SCHEME in "original" "h2o" "infinigen" "rl_cache"
 do
+  echo "================== Evaluating scheme: $SCHEME =================="
+
   rm $FLEXGEN_PATH/flexgen/flex_opt.py
   rm $FLEXGEN_PATH/flexgen/pytorch_backend.py
   rm $FLEXGEN_PATH/flexgen/run_lm_eval_harness.py
@@ -26,7 +28,7 @@ do
   then
     CMD=$CMD" --max-num-kv 409 --hh-ratio 0.1 --hh-all"
   fi
-  python -u $FLEXGEN_PATH/flexgen/run_lm_eval_harness.py $CMD
+  python -m flexgen.run_lm_eval_harness $CMD
 
   # Evaluate results
   python -u $FLEXGEN_PATH/../../accuracy/lm_eval/evaluate_task_result.py \
@@ -34,6 +36,6 @@ do
     --task-name ${task} \
     --num-fewshot ${shots} \
     --model-name facebook/${model}
-  
-  # rm $FLEXGEN_PATH/flexgen/results/${task}-${shots}-${model}-${SCHEME}.jsonl
+
+  rm $FLEXGEN_PATH/flexgen/results/${task}-${shots}-${model}-${SCHEME}.jsonl
 done

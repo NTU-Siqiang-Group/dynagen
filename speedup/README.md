@@ -30,4 +30,28 @@ Following is the amount of time to run each experiments on our system (NVIDIA RT
 - Figure 16b: 60 minutes
 - Figure 17a: 20 minutes
 - Figure 17b: 10 minutes
+## Evaluate Accuracy (13 minutes)
+We provide scripts to evaluate the accuracy of different speedup schemes using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness).
 
+To begin with, please ensure that you have walked through the **Getting Started** section and installed required modules such as `lm-eval` and `ftfy`.
+
+For a "Hello world"-sized example, please run the following command to prepare datasets (3 minutes):
+```sh
+$ pwd
+/path/to/infinigen/speedup
+
+$ mkdir -p ./flexgen/flexgen/results
+
+$ cd ../accuracy/lm_eval/
+$ mkdir results
+$ python -u generate_task_data.py --output-file results/openbookqa-5.jsonl --task-name openbookqa --num-fewshot 5
+
+$ cp results/openbookqa-5.jsonl ../../speedup/flexgen/flexgen/results/
+$ cd ../../speedup/
+```
+
+Then run the following command to start the evaluation (10 minutes):
+```sh
+cd scripts
+bash run_lm_eval_harness.sh openbookqa opt-6.7b ../pg19_firstbook.txt 5 0.2 4 1.0 0.2
+```
