@@ -10,6 +10,7 @@ no_skewing=${9}
 
 FLEXGEN_PATH=$PWD/../flexgen
 for SCHEME in "original" "h2o" "infinigen" "rl_cache"
+for SCHEME in "original"
 do
   echo "================== Evaluating scheme: $SCHEME =================="
 
