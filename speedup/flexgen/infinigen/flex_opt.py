@@ -17,7 +17,7 @@ from transformers import AutoTokenizer
 
 from flexgen.compression import CompressionConfig
 from flexgen.opt_config import OptConfig, get_opt_config, download_opt_weights
-from flexgen.pytorch_backend import (TorchDevice, TorchDisk, TorchLink,
+from flexgen.pytorch_backend import (TorchCPUWeightTensorManager, TorchDevice, TorchDisk, TorchLink,
     TorchMixedDevice, DeviceType, general_copy, fix_recursive_import, TorchTensor)
 from flexgen.timer import timers
 from flexgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
@@ -83,58 +83,6 @@ class Policy:
         return 100 - self.act_gpu_percent - self.act_cpu_percent
 
 
-def get_choice(cur_percent, percents, choices):
-    percents = np.cumsum(percents)
-    assert np.abs(percents[-1] - 100) < 1e-5
-
-    for i in range(len(percents)):
-        if cur_percent < percents[i]:
-            return choices[i]
-    return choices[-1]
-
-
-def init_weight_list(weight_specs, policy, env):
-    dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
-    dev_choices = [env.disk, env.cpu, env.gpu]
-
-    sizes = [np.prod(spec[0]) for spec in weight_specs]
-    sizes_cumsum = np.cumsum(sizes)
-    ret = []
-    for i in range(len(weight_specs)):
-        mid_percent = (sizes_cumsum[i] - sizes[i] / 2) / sizes_cumsum[-1]
-        home = get_choice(mid_percent * 100, dev_percents, dev_choices)
-        shape, dtype, filename = weight_specs[i]
-
-        if len(shape) < 2:
-            pin_memory = True
-            compress = False
-        else:
-            pin_memory = policy.pin_weight
-            compress = policy.compress_weight
-
-        if not compress:
-            weight = home.allocate(shape, dtype, pin_memory=pin_memory)
-
-            if DUMMY_WEIGHT not in filename:
-                weight.load_from_np_file(weight_specs[i][2])
-            else:
-                weight.load_from_np(np.ones(shape, dtype))
-                #weight.load_from_np(np.random.rand(*shape).astype(dtype))
-        else:
-            weight = home.compressed_device.allocate(
-                shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
-
-            if DUMMY_WEIGHT not in filename:
-                weight.load_from_np_file(weight_specs[i][2])
-            else:
-                for i in range(2):
-                    x = weight.data[i]
-                    x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
-
-        ret.append(weight)
-    return ret
-
-
 class InputEmbed:
     def __init__(self, config, env, policy):
         self.config = config
@@ -149,19 +97,26 @@ class InputEmbed:
     def set_task(self, task):
         self.task = task
 
-    def init_weight(self, weight_home, path):
+    def get_weight_specs(self, path):
         v, h, s, dtype = (self.config.vocab_size, self.config.input_dim,
             self.config.max_seq_len, self.config.dtype)
         path = os.path.join(path, "")
-        weight_specs = [
+        return [
             # w_token
             ((v, h), dtype, path + "decoder.embed_tokens.weight"),
             # w_pos
             ((s + 2, h), dtype, path + "decoder.embed_positions.weight"),
         ]
-        weights = init_weight_list(weight_specs, self.policy, self.env)
 
-        weight_home.store(weights)
+    def init_weight(self, weight_manager, weight_home, path):
+        weight_specs = self.get_weight_specs(path)
+        weight_manager.init_cpu_weight(weight_specs, self.policy)
+
+        weight_home.store([None] * len(weight_specs))
+
+    def set_weight(self, weight_manager, weight_home, path):
+        weight_specs = self.get_weight_specs(path)
+        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_token, w_pos = weight_home.val
@@ -213,11 +168,11 @@ class OutputEmbed:
     def set_task(self, task):
         self.task = task
 
-    def init_weight(self, weight_home, path):
+    def get_weight_specs(self, path):
         v, h, dtype = (self.config.vocab_size, self.config.input_dim,
             self.config.dtype)
         path = os.path.join(path, "")
-        weight_specs = [
+        return [
             # w_ln
             ((h,), dtype, path + "decoder.layer_norm.weight"),
             # b_ln
@@ -225,9 +180,16 @@ class OutputEmbed:
             # w_token
             ((v, h), dtype, path + "decoder.embed_tokens.weight"),
         ]
-        weights = init_weight_list(weight_specs, self.policy, self.env)
 
-        weight_home.store(weights)
+    def init_weight(self, weight_manager, weight_home, path):
+        weight_specs = self.get_weight_specs(path)
+        weight_manager.init_cpu_weight(weight_specs, self.policy)
+
+        weight_home.store([None] * len(weight_specs))
+
+    def set_weight(self, weight_manager, weight_home, path):
+        weight_specs = self.get_weight_specs(path)
+        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, b_ln, w_token = weight_home.val
@@ -292,16 +254,17 @@ class SelfAttention:
     def set_task(self, task):
         self.task = task
 
-    def init_weight(self, weight_home, path):
+    def get_weight_specs(self, path):
         h, dtype = (self.config.input_dim, self.config.dtype)
         path = os.path.join(os.path.join(path, f"decoder.layers.{self.layer_id}.self_attn"))
-        weight_specs = [
+        head_dim = h // self.config.n_head
+        return [
             # w_q
-            ((h, h), dtype, path + ".q_proj.weight"),
+            ((h, h), dtype, path + ".q_proj.weight", weight_bias_concat, {"weight": "weights[0]", "bias": "weights[1]", "scaling": True, "head_dim": head_dim}),
             # b_q
             ((h,), dtype, path + ".q_proj.bias"),
             # w_k
-            ((h, h), dtype, path + ".k_proj.weight"),
+            ((h, h), dtype, path + ".k_proj.weight", weight_bias_concat, {"weight": "weights[2]", "bias": "weights[3]"}),
             # b_k
             ((h,), dtype, path + ".k_proj.bias"),
             # w_v
@@ -317,17 +280,24 @@ class SelfAttention:
             # b_ln
             ((h,), dtype, path + "_layer_norm.bias"),
         ]
-        weights = init_weight_list(weight_specs, self.policy, self.env)
 
-        # WQ
-        head_dim = h // self.config.n_head
-        weights[0].data = weight_bias_concat(weights[0].data, weights[1].data, True, head_dim)
-        weights[0].shape = (h, h+1)
-        # WK
-        weights[2].data = weight_bias_concat(weights[2].data, weights[3].data)
-        weights[2].shape = (h, h+1)
+    def init_weight(self, weight_manager, weight_home, path):
+        weight_specs = self.get_weight_specs(path)
+        weight_manager.init_cpu_weight(weight_specs, self.policy)
 
-        weight_home.store(weights)
+        # # WQ
+        # head_dim = h // self.config.n_head
+        # weights[0].data = weight_bias_concat(weights[0].data, weights[1].data, True, head_dim)
+        # weights[0].shape = (h, h+1)
+        # # WK
+        # weights[2].data = weight_bias_concat(weights[2].data, weights[3].data)
+        # weights[2].shape = (h, h+1)
+
+        weight_home.store([None] * len(weight_specs))
+
+    def set_weight(self, weight_manager, weight_home, path):
+        weight_specs = self.get_weight_specs(path)
+        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight_home.val
@@ -559,10 +529,10 @@ class MLP:
     def set_task(self, task):
         self.task = task
 
-    def init_weight(self, weight_home, path):
+    def get_weight_specs(self, path):
         h, dtype = (self.config.input_dim, self.config.dtype)
         path = os.path.join(os.path.join(path, f"decoder.layers.{self.layer_id}."))
-        weight_specs = [
+        return [
             # wi
             ((4 * h, h), dtype, path + "fc1.weight"),
             # bi
@@ -576,8 +546,11 @@ class MLP:
             # b_ln
             ((h,), dtype, path + "final_layer_norm.bias"),
         ]
-        weights = init_weight_list(weight_specs, self.policy, self.env)
-        weight_home.store(weights)
+
+    def init_weight(self, weight_manager, weight_home, path):
+        weight_specs = self.get_weight_specs(path)
+        weight_manager.init_cpu_weight(weight_specs, self.policy)
+        weight_home.store([None] * len(weight_specs))
 
     def load_weight(self, weight_home, weight_read_buf, k):
         wi, bi, wo, bo, w_ln, b_ln = weight_home.val
@@ -629,10 +602,10 @@ class TransformerLayer:
         self.attention.set_task(task)
         self.mlp.set_task(task)
 
-    def init_weight(self, weight_home, path):
+    def init_weight(self, weight_manager, weight_home, path):
         home1, home2 = ValueHolder(), ValueHolder()
-        self.attention.init_weight(home1, path)
-        self.mlp.init_weight(home2, path)
+        self.attention.init_weight(weight_manager, home1, path)
+        self.mlp.init_weight(weight_manager, home2, path)
         weight_home.store((home1, home2))
 
     def load_weight(self, weight_home, weight_read_buf, k):
@@ -737,6 +710,7 @@ class OptLM:
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
 
         self.task = None
+        self.weight_manager = TorchCPUWeightTensorManager(self.env)
         self.init_all_weights()
 
     def set_task(self, task):
@@ -751,7 +725,13 @@ class OptLM:
         if not os.path.exists(check_path) and DUMMY_WEIGHT not in check_path:
             download_opt_weights(self.config.name, self.path)
 
-        self.layers[j].init_weight(self.weight_home[j], expanded_path)
+        self.layers[j].init_weight(self.weight_manager, self.weight_home[j], expanded_path)
+
+    def set_weight(self):
+        expanded_path = os.path.abspath(os.path.expanduser(
+            os.path.join(self.path, f"{self.config.name}-np")))
+        for j in range(self.num_layers):
+            self.layers[j].set_weight(self.weight_manager, self.weight_home[j], expanded_path)
 
     def load_weight(self, i, j, k, overlap=True):
         # Handle corner cases
