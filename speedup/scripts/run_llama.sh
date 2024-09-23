@@ -10,12 +10,13 @@ do
   ln -s ../$SCHEME/flex_opt.py $FLEXGEN_PATH/flexgen/flex_opt.py
   ln -s ../$SCHEME/pytorch_backend.py $FLEXGEN_PATH/flexgen/pytorch_backend.py
   
-
-  for MODEL in "meta-llama/Llama-2-7b-chat-hf"
+  # for MODEL in "meta-llama/Llama-2-7b-chat-hf"
+  # for MODEL in "THUDM/LongWriter-llama3.1-8b"
+  for MODEL in "meta-llama/Meta-Llama-3.1-8B-Instruct"
   do
     CMD="--model $MODEL"
-    CMD=$CMD" --percent 100 0 0 100 100 0"
-    CMD=$CMD" --overlap false --gpu-batch-size 1 --num-gpu-batches 1 --prompt-len 1920 --gen-len 128"
+    CMD=$CMD" --percent 100 0 100 0 100 0"
+    CMD=$CMD" --overlap false --gpu-batch-size 1 --num-gpu-batches 1 --prompt-len 32 --gen-len 64"
     if [ "$SCHEME" = "int4" ]
     then
       CMD=$CMD" --compress-cache"
