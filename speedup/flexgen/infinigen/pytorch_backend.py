@@ -8,6 +8,7 @@ import re
 import shutil
 import time
 import threading
+import types
 from typing import Dict, List, Optional, Union, Tuple
 
 import torch
@@ -1002,18 +1003,17 @@ class TorchCPUWeightTensorManager:
             self._cpu_compressed_weights_initialized = True
         assert len(cpu_weight_sizes) == len(self._cpu_weight_percent_cumsum_idx)
 
-    # TODO: cache tensor
     def _get_cpu_weight(self, key, compress, shape, dtype, comp_weight_config, tensor=None) -> TorchTensor:
         if not compress:
             cpu_weight = self._cpu_weights.get(os.path.basename(key))
             if cpu_weight is not None:
                 if tensor is not None: # Cache tensor only when not compressing the weights
-                    key = os.path.basename(filename)
+                    key = os.path.basename(key)
                     idx = self._cpu_weight_sizes.index((key, cpu_weight.bytes))
                     cpu_weight.data = tensor
                     cpu_weight.shape = tensor.shape
                     self._cpu_weights[key] = cpu_weight
-                    self._cpu_weight_sizes[idx] = cpu_weight.bytes
+                    self._cpu_weight_sizes[idx] = (key, cpu_weight.bytes)
                 return cpu_weight.copy(self._dev)
         else:
             cpu_weight = self._cpu_compressed_weights.get(os.path.basename(key))
@@ -1070,10 +1070,10 @@ class TorchCPUWeightTensorManager:
                 continue
 
             before_init_cpu_weight_hook, kwargs = args
-            assert isinstance(before_init_cpu_weight_hook, function)
+            assert isinstance(before_init_cpu_weight_hook, types.FunctionType)
             assert isinstance(kwargs, dict)
 
-            for k, maybe_weights_idx in kwargs:
+            for k, maybe_weights_idx in kwargs.items():
                 if not isinstance(maybe_weights_idx, str):
                     continue
 
@@ -1081,7 +1081,7 @@ class TorchCPUWeightTensorManager:
                 if not matched:
                     continue
 
-                shape, dtype, filename = weight_specs[int(matched.group(1))] # No support for resolving recursive after_init_cpu_weight_hook for now
+                shape, dtype, filename, *_ = weight_specs[int(matched.group(1))] # No support for resolving recursive after_init_cpu_weight_hook for now
                 kwargs[k] = self._get_cpu_weight(
                     filename, compress, shape, dtype, policy.comp_weight_config
                 )
@@ -1102,7 +1102,7 @@ class TorchCPUWeightTensorManager:
             sizes_cumsum = np.cumsum(sizes)
 
         for i in range(len(weight_specs)):
-            shape, dtype, filename, _ = weight_specs[i]
+            shape, dtype, filename, *_ = weight_specs[i]
             key = filename if not dummy else shape
 
             if dummy:

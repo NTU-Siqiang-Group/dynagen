@@ -297,6 +297,9 @@ class SelfAttention:
 
     def set_weight(self, weight_manager, weight_home, path):
         weight_specs = self.get_weight_specs(path)
+        h = self.config.input_dim
+        weight_specs[0] = ((h, h+1), *weight_specs[0][1:])
+        weight_specs[2] = ((h, h+1), *weight_specs[2][1:])
         weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
@@ -551,6 +554,10 @@ class MLP:
         weight_specs = self.get_weight_specs(path)
         weight_manager.init_cpu_weight(weight_specs, self.policy)
         weight_home.store([None] * len(weight_specs))
+
+    def set_weight(self, weight_manager, weight_home, path):
+        weight_specs = self.get_weight_specs(path)
+        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         wi, bi, wo, bo, w_ln, b_ln = weight_home.val
@@ -972,6 +979,7 @@ class OptLM:
         prompt_len, gen_len = task.prompt_len, task.gen_len
         self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
         self.warmup = warmup
+        self.set_weight()
 
         # Output token ids
         self.output_ids = np.full((len(task.inputs), prompt_len + gen_len),

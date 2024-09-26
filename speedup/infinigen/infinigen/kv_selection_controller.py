@@ -19,7 +19,7 @@ def select_kv(prefetch_idx, k_cache, v_cache):
     """
 
     prefetch_idx = prefetch_idx.squeeze().to(k_cache.device)
-    ind = prefetch_idx * k_cache.shape[1] + torch.arange(k_cache.shape[1])[None, :]
+    ind = prefetch_idx * k_cache.shape[1] + torch.arange(k_cache.shape[1], device=k_cache.device)[None, :]
     selected_k = F.embedding(ind, k_cache.reshape(-1, k_cache.shape[2]))
     selected_v = F.embedding(ind, v_cache.reshape(-1, v_cache.shape[2]))
     return selected_k, selected_v
