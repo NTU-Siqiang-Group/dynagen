@@ -1111,8 +1111,6 @@ class OptLM:
 
     def generate(
         self,
-        batch_idx: int,
-        policy: Policy,
         inputs: Union[np.array, List[List[int]]],
         max_new_tokens: int = 32,
         do_sample: bool = False,
@@ -1142,7 +1140,6 @@ class OptLM:
         overlap = self.policy.overlap
         prompt_len, gen_len = task.prompt_len, task.gen_len
         self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
-        self.set_policy(policy)
         self.set_weight()
         self.set_home(self.policy.num_gpu_batches)
 
@@ -1160,14 +1157,13 @@ class OptLM:
         # The following buffers store values used
         # for the i-th token, j-th layer, k-th gpu batch.
         num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
-        if batch_idx == 0:
-            for j in range(num_layers):
-                for k in range(num_gpu_batches):
-                    self.cache_home[j][k].clear()
-                    self.cache_read_buf[j][k].clear()
-                    self.cache_write_buf[j][k].clear()
-            for j in range(num_layers):
-                self.weight_read_buf[j].clear()
+        for j in range(num_layers):
+            for k in range(num_gpu_batches):
+                self.cache_home[j][k].clear()
+                self.cache_read_buf[j][k].clear()
+                self.cache_write_buf[j][k].clear()
+        for j in range(num_layers):
+            self.weight_read_buf[j].clear()
         self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
         for k in range(num_gpu_batches):
             self.attention_mask[k].clear()
@@ -1231,11 +1227,22 @@ class OptLM:
         else:
             self.keep_load_gpu_weight = False
         # Prologue
+        batch_sizes = [2, 2, 2, 2, 2]
+        cache_gpu_percents = [100, 100, 100, 100, 100]
+        w_gpu_percents = [20, 40, 60, 80, 100]
+        policy = self.policy
+        policy.gpu_batch_size = batch_sizes[0]
+        policy.cache_gpu_percent = cache_gpu_percents[0]
+        policy.cache_cpu_percent = 100 - cache_gpu_percents[0]
+        policy.w_gpu_percent = w_gpu_percents[0]
+        policy.w_cpu_percent = 100 - w_gpu_percents[0]
+        self.set_weight()
         for k in range(self.policy.num_gpu_batches):
             self.load_weight(0, 0, k)
         self.sync()
 
         # Generate
+
         for i in range(self.execute_gen_len):
             timers("generate").start()
             self.update_attention_mask(i, 0)
@@ -1250,6 +1257,15 @@ class OptLM:
                 self.store_cache(i, j - 1, 0)
                 self.store_hidden(i, j, 0)
                 self.sync()
+            if i + 1 < len(batch_sizes):
+                policy.gpu_batch_size = batch_sizes[i + 1]
+                policy.cache_gpu_percent = cache_gpu_percents[i + 1]
+                policy.cache_cpu_percent = 100 - cache_gpu_percents[i + 1]
+                policy.w_gpu_percent = w_gpu_percents[i + 1]
+                policy.w_cpu_percent = 100 - w_gpu_percents[i + 1]
+                print("policy:", policy)
+                self.set_policy(policy)
+                self.set_weight()
             timers("generate").stop()
 
             if self.task.stop and np.all(self.stopped):
@@ -1264,14 +1280,30 @@ class OptLM:
         else:
             self.keep_load_gpu_weight = False
         # Prologue
+        policy = self.policy
         for k in range(self.policy.num_gpu_batches):
             self.load_weight(0, 0, k)
         self.load_hidden(0, 0, 0)
         self.sync()
 
         # Generate
+        batch_sizes = [2, 2, 2, 2, 2]
+        # num_gpu_batches is impossible to change within a generation_loop
+        # nums_gpu_batches = [2, 2, 2, 2, 2]
+        cache_gpu_percents = [100, 100, 100, 100, 100]
+        w_gpu_percents = [20, 40, 60, 80, 100]
+
         for i in range(self.execute_gen_len):
             timers("generate").start()
+            if i < len(batch_sizes):
+                policy.gpu_batch_size = batch_sizes[i]
+                policy.cache_gpu_percent = cache_gpu_percents[i]
+                policy.cache_cpu_percent = 100 - cache_gpu_percents[i]
+                policy.w_gpu_percent = w_gpu_percents[i]
+                policy.w_cpu_percent = 100 - w_gpu_percents[i]
+                print("policy:", policy)
+                self.set_policy(policy)
+                self.set_weight()
             for k in range(self.policy.num_gpu_batches):
                 self.update_attention_mask(i, k)
             for j in range(self.num_layers):
@@ -1327,11 +1359,6 @@ def get_test_inputs(prompt_len, num_prompts, tokenizer):
 
 
 def run_flexgen(args):
-    batch_sizes = [2, 2, 2, 2, 2]
-    nums_gpu_batches = [2, 2, 2, 2, 2]
-    cache_gpu_percents = [100, 100, 100, 100, 100]
-    w_gpu_percents = [20, 40, 60, 80, 100]
-
     print(f"<run_flexgen>: args.model: {args.model}")
     if args.model == "facebook/galactica-30b":
         tokenizer = AutoTokenizer.from_pretrained(
@@ -1346,6 +1373,7 @@ def run_flexgen(args):
 
     # Task and policy
     warmup_inputs = get_test_inputs(32, num_prompts, tokenizer)
+    inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
 
     gpu = TorchDevice("cuda:0")
     cpu = TorchDevice("cpu")
@@ -1390,42 +1418,19 @@ def run_flexgen(args):
     try:
         print("warmup - generate")
         output_ids = model.generate(
-            0, policy, warmup_inputs, max_new_tokens=1, verbose=args.verbose
+            warmup_inputs, max_new_tokens=1, verbose=args.verbose
         )
 
         print("benchmark - generate")
         timers("generate").reset()
 
-        for batch_idx, (
-            batch_size,
-            num_gpu_batches,
-            cache_gpu_percent,
-            w_gpu_percents,
-        ) in enumerate(
-            zip(batch_sizes, nums_gpu_batches, cache_gpu_percents, w_gpu_percents)
-        ):
-            if batch_idx == len(batch_sizes) - 1:
-                batch_idx = -1
-            policy.gpu_batch_size = batch_size
-            policy.num_gpu_batches = num_gpu_batches
-            policy.cache_gpu_percent = cache_gpu_percent
-            policy.cache_cpu_percent = 100 - cache_gpu_percent
-            policy.w_gpu_percent = w_gpu_percents
-            policy.w_cpu_percent = 100 - w_gpu_percents
-            inputs = get_test_inputs(
-                prompt_len, batch_size * num_gpu_batches, tokenizer
-            )
-            print("len(inputs):", len(inputs))
-            print("policy:", policy)
-            output_ids = model.generate(
-                batch_idx,
-                policy,
-                inputs,
-                max_new_tokens=args.gen_len,
-                debug_mode=args.debug_mode,
-                cut_gen_len=cut_gen_len,
-                verbose=args.verbose,
-            )
+        output_ids = model.generate(
+            inputs,
+            max_new_tokens=args.gen_len,
+            debug_mode=args.debug_mode,
+            cut_gen_len=cut_gen_len,
+            verbose=args.verbose,
+        )
         costs = timers("generate").costs
     finally:
         env.close_copy_threads()
