@@ -1188,7 +1188,7 @@ class TorchCPUWeightTensorManager:
                 if cur_percent < percents[i]:
                     return self._dev_choices[i]
             return self._dev_choices[-1]
-        
+
         key = os.path.basename(key)
         if not compress:
             cur_idx = self._cpu_weight_percent_cumsum_idx[key]
@@ -1196,7 +1196,7 @@ class TorchCPUWeightTensorManager:
         else:
             cur_idx = self._cpu_compressed_weight_percent_cumsum_idx[key]
             boundaries = np.searchsorted(self._cpu_compressed_weight_percent_cumsum["size"], percents)
-        
+
         for i in range(len(boundaries)):
             if cur_idx < boundaries[i]:
                 return self._dev_choices[i]
@@ -1229,11 +1229,11 @@ class TorchCPUWeightTensorManager:
         if not compress:
             cpu_weight = self._cpu_weights.get(os.path.basename(key))
             if cpu_weight is not None:
-                return cpu_weight.copy(self._dev)
+                return cpu_weight
         else:
             cpu_weight = self._cpu_compressed_weights.get(os.path.basename(key))
             if cpu_weight is not None:
-                return cpu_weight.copy(self._comp_dev)
+                return cpu_weight
 
         # cpu_weights MISS, create and store it
         if self.DUMMY_WEIGHT not in key:  # Use real weights, key == filename
@@ -1242,20 +1242,20 @@ class TorchCPUWeightTensorManager:
             if not compress:
                 cpu_weight = self._dev.allocate(shape, dtype, pin_memory=True)
                 cpu_weight.load_from_np_file(filename)
-                self._cpu_weights[key] = cpu_weight.copy(self._dev)
+                self._cpu_weights[key] = cpu_weight
                 self._cpu_weight_sizes.append((key, cpu_weight.bytes))
             else:
                 cpu_weight = self._comp_dev.allocate(
                     shape, dtype, comp_weight_config, pin_memory=True
                 )
                 cpu_weight.load_from_np_file(filename)
-                self._cpu_compressed_weights[key] = cpu_weight.copy(self._comp_dev)
+                self._cpu_compressed_weights[key] = cpu_weight
                 self._cpu_compressed_weight_sizes.append((key, cpu_weight.bytes))
         else:  # Use dummy weights for benchmark purposes, key == shape
             if not compress:
                 cpu_weight = self._dev.allocate(shape, dtype, pin_memory=True)
                 cpu_weight.load_from_np(np.ones(shape, dtype))
-                self._cpu_weights[key] = cpu_weight.copy(self._dev)
+                self._cpu_weights[key] = cpu_weight
                 self._cpu_weight_sizes.append((str(key), cpu_weight.bytes))
             else:
                 cpu_weight = self._comp_dev.allocate(
@@ -1265,7 +1265,7 @@ class TorchCPUWeightTensorManager:
                     x = cpu_weight.data[i]
                     assert isinstance(x, TorchTensor)
                     x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
-                self._cpu_compressed_weights[key] = cpu_weight.copy(self._comp_dev)
+                self._cpu_compressed_weights[key] = cpu_weight
                 self._cpu_compressed_weight_sizes.append((str(key), cpu_weight.bytes))
         return cpu_weight
 
@@ -1302,14 +1302,11 @@ class TorchCPUWeightTensorManager:
             else:
                 home = self._get_choice(dummy, key, policy.compress_weight, dev_percents)
 
-            if (
-                weight_home.val[i] is not None
-                and home.device_type == weight_home.val[i].device.device_type
-            ):
-                continue
-
             if weight_home.val[i] is not None:
-                weight_home.val[i].delete()
+                if home.device_type == weight_home.val[i].device.device_type:
+                    continue
+                if weight_home.val[i].device.device_type != DeviceType.CPU:
+                    weight_home.val[i].delete()
 
             if len(shape) < 2:
                 pin_memory = True
@@ -1317,7 +1314,7 @@ class TorchCPUWeightTensorManager:
             else:
                 pin_memory = policy.pin_weight
                 compress = policy.compress_weight
-            
+
             cpu_weight = self._get_cpu_weight(
                 key, compress, shape, dtype, policy.comp_weight_config
             )
