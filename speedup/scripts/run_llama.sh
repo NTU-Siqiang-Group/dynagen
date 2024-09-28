@@ -25,7 +25,7 @@ do
       CMD=$CMD" --max-num-kv 409 --hh-ratio 0.1 --hh-all"
     elif [ "$SCHEME" = "infinigen" ]
     then
-      CMD=$CMD" --alpha 4 --partial-weight-ratio 0.2 --max-num-kv 409"
+      CMD=$CMD" --warmup-input-path ../flexgen/pg19_firstbook.txt --test-input-path ../flexgen/pg19_firstbook.txt --alpha 4 --partial-weight-ratio 0.2 --max-num-kv 409"
     fi
     python -m flexgen.flex_llama $CMD
   done

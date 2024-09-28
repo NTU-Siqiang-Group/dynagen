@@ -108,7 +108,10 @@ class TorchTensor:
 
     def delete(self):
         assert self.device is not None, "already deleted"
-        if self.device.device_type == DeviceType.DISK:
+        if (
+            self.device.device_type == DeviceType.DISK
+            or self.device.device_type == DeviceType.MIXED
+        ):
             self.device.delete(self)
         self.device = self.data = None
 

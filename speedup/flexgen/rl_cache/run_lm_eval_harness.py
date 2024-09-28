@@ -42,10 +42,8 @@ def init_flexgen(args, tokenizer):
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
     opt_config = get_opt_config(args.model)
-    # cache_size = opt_config.cache_bytes(num_prompts, prompt_len + gen_len)
-    # hidden_size = opt_config.hidden_bytes(num_prompts, prompt_len + gen_len)
     model = OptLM(opt_config, env, args.path, policy)
-    model.generate(0, policy, warmup_inputs, max_new_tokens=1)
+    model.generate(0, warmup_inputs, max_new_tokens=1)
     return model, env, policy
 
 def run_flexgen(model, tokenizer, prompt, policy):
@@ -84,7 +82,6 @@ def run_flexgen(model, tokenizer, prompt, policy):
             cut_gen_len=1,
             evaluate=True
         )
-    # costs = timers("generate").costs
     
     return logits
 

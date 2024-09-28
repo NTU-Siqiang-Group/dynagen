@@ -989,11 +989,6 @@ def general_copy(
     >>> env.disk.synchronize()
     >>> torch.cuda.synchronize()
     """
-
-    # print("[DEBUG] general_copy:")
-    # print("\tsrc:", src)
-    # print("\tdst:", dst)
-
     if dst.device.device_type == DeviceType.MIXED:
         # The tensor is on mixed devices, do recursive calls
         assert src.device.device_type != DeviceType.MIXED

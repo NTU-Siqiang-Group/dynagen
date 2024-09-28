@@ -947,7 +947,7 @@ class OptLM:
         if debug_mode is None:
             if not overlap:
                 # No overlap, easy to understand, suitable for debugging
-                self.generation_loop_normal()
+                self.generation_loop_normal(evaluate)
             else:
                 # Overlap I/O and compute
                 if num_gpu_batches == 1:
@@ -978,7 +978,7 @@ class OptLM:
 
         return self.output_ids
 
-    def generation_loop_normal(self):
+    def generation_loop_normal(self, evaluate):
         for i in range(self.execute_gen_len):
             timers("generate").start()
             for k in range(self.num_gpu_batches):
@@ -994,6 +994,9 @@ class OptLM:
                     if (j in self.attn_layer[2:]) and (i > 0):
                         self.sync()
                     self.compute_layer(i, j, k)
+                    if evaluate and j == self.num_layers - 1:
+                        self.sync()
+                        break
                     self.sync()
                     self.store_hidden(i, j, k)
                     self.store_cache(i, j, k, overlap=False)
