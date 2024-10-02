@@ -10,7 +10,13 @@ from typing import Union
 from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
-from flexgen.pytorch_backend import LlamaTorchDevice, TorchCPUWeightTensorManager, TorchDisk, TorchMixedDevice, fix_recursive_import
+from flexgen.pytorch_backend import (
+    LlamaTorchDevice,
+    TorchCPUWeightTensorManager,
+    TorchDisk,
+    TorchMixedDevice,
+    fix_recursive_import,
+)
 from flexgen.flex_opt import (
     Policy,
     InputEmbed,
@@ -128,13 +134,22 @@ class LlamaOutputEmbed(OutputEmbed):
             (w_ln, _), (w_token, _) = weight_read_buf.val
 
         h = self.compute.llama_output_embed(
-            h, w_ln, w_token, self.config.rms_norm_eps, donate, do_sample=True, temperature=0.5, evaluate=self.task.evaluate
+            h,
+            w_ln,
+            w_token,
+            self.config.rms_norm_eps,
+            donate,
+            do_sample=True,
+            temperature=0.5,
+            evaluate=self.task.evaluate,
         )
         hidden.val = h
 
 
 class LlamaSelfAttention(SelfAttention):
-    def __init__(self, config, env, policy, layer_id, enable_prefetching, partial_weight_ratio=0.2, alpha=4, max_num_kv=400):
+    def __init__(
+        self, config, env, policy, layer_id, enable_prefetching, partial_weight_ratio=0.2, alpha=4, max_num_kv=400
+    ):
         super().__init__(config, env, policy, layer_id, enable_prefetching, partial_weight_ratio, alpha, max_num_kv)
 
     def get_weight_specs(self, path):
@@ -188,8 +203,23 @@ class LlamaSelfAttention(SelfAttention):
 
     # TODO: prefetch_cache?
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k,
-                warmup, partial_weight_read_buf, partial_cache_read_buf, speculation_stream, prev_partial_cache_read_buf, prev_partial_weight_read_buf, weight_home):
+    def forward(
+        self,
+        hidden,
+        cache_read_buf,
+        weight_read_buf,
+        attention_mask,
+        cache_write_buf,
+        i,
+        k,
+        warmup,
+        partial_weight_read_buf,
+        partial_cache_read_buf,
+        speculation_stream,
+        prev_partial_cache_read_buf,
+        prev_partial_weight_read_buf,
+        weight_home,
+    ):
         n_head = self.config.n_head
         n_kv_head = self.config.num_key_value_heads
 
@@ -236,7 +266,9 @@ class LlamaSelfAttention(SelfAttention):
             )
             cache_write_buf.store((new_k_cache, new_v_cache))
             if (prev_partial_cache_read_buf is not None) and (not warmup):
-                prev_partial_cache_read_buf.store(set_partial_cache(new_k_cache.data, self.partial_index, n_head, head_dim))
+                prev_partial_cache_read_buf.store(
+                    set_partial_cache(new_k_cache.data, self.partial_index, n_head, head_dim)
+                )
                 prev_partial_weight_read_buf.store(set_partial_weight(w_q.data, self.partial_index, n_head, head_dim))
             if warmup:
                 weight_home.val[0] = w_q.smart_copy(weight_home.val[0].device)[0]
@@ -248,61 +280,40 @@ class LlamaSelfAttention(SelfAttention):
                 partial_k_cache = partial_cache_read_buf.val
             position_ids = torch.cumsum(mask.data, dim=1).int() * mask.data + 1
             position_ids = position_ids[:, -h.shape[1]].unsqueeze(1)
-            if self.enable_prefetching:
-                h, new_k_cache, new_v_cache, self.prefetch_idx = self.compute.llama_mha_gen(
-                    h,
-                    position_ids,
-                    mask,
-                    w_ln,
-                    w_q,
-                    w_k,
-                    w_v,
-                    w_re,
-                    w_o,
-                    self.config.rms_norm_eps,
-                    n_head,
-                    n_kv_head,
-                    k_cache,
-                    v_cache,
-                    donate,
-                    self.policy.attn_sparsity,
-                    self.policy.compress_cache,
-                    self.policy.comp_cache_config,
-                    p_w_q,
-                    partial_k_cache,
-                    speculation_stream,
-                    self.alpha,
-                    self.max_num_kv,
-                )
-            else:
-                h, new_k_cache, new_v_cache, _ = self.compute.llama_mha_gen(
-                    h,
-                    position_ids,
-                    mask,
-                    w_ln,
-                    w_q,
-                    w_k,
-                    w_v,
-                    w_re,
-                    w_o,
-                    self.config.rms_norm_eps,
-                    n_head,
-                    n_kv_head,
-                    k_cache,
-                    v_cache,
-                    donate,
-                    self.policy.attn_sparsity,
-                    self.policy.compress_cache,
-                    self.policy.comp_cache_config,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+            h, new_k_cache, new_v_cache, self.prefetch_idx = self.compute.llama_mha_gen(
+                h,
+                position_ids,
+                mask,
+                w_ln,
+                w_q,
+                w_k,
+                w_v,
+                w_re,
+                w_o,
+                self.config.rms_norm_eps,
+                n_head,
+                n_kv_head,
+                k_cache,
+                v_cache,
+                donate,
+                self.policy.attn_sparsity,
+                self.policy.compress_cache,
+                self.policy.comp_cache_config,
+                p_w_q,
+                partial_k_cache,
+                speculation_stream,
+                self.alpha,
+                self.max_num_kv,
+            )
+
             cache_write_buf.store((new_k_cache, new_v_cache))
             if (prev_partial_cache_read_buf is not None) and (self.layer_id > 1):
-                prev_partial_cache_read_buf.val = torch.cat((prev_partial_cache_read_buf.val, set_partial_cache(new_k_cache.data, self.partial_index, n_head, head_dim)))
+                prev_partial_cache_read_buf.val = torch.cat(
+                    (
+                        prev_partial_cache_read_buf.val,
+                        set_partial_cache(new_k_cache.data, self.partial_index, n_head, head_dim),
+                    )
+                )
 
         hidden.val = h
 
@@ -366,8 +377,16 @@ class LlamaTransformerLayer(TransformerLayer):
 
 
 class LlamaLM(OptLM):
-    def __init__(self, config: Union[str, LlamaConfig], env: ExecutionEnv, path: str, policy: Policy,
-                 partial_weight_ratio, alpha, max_num_kv):
+    def __init__(
+        self,
+        config: Union[str, LlamaConfig],
+        env: ExecutionEnv,
+        path: str,
+        policy: Policy,
+        partial_weight_ratio,
+        alpha,
+        max_num_kv,
+    ):
         if isinstance(config, str):
             config = get_llama_config(config)
         self.config = config
@@ -382,9 +401,17 @@ class LlamaLM(OptLM):
         for i in range(self.config.num_hidden_layers):
             if policy.sep_layer:
                 if (i == 0) or (i == (self.config.num_hidden_layers - 1)):
-                    layers.append(LlamaSelfAttention(self.config, self.env, self.policy, i, False, partial_weight_ratio, alpha, max_num_kv))
+                    layers.append(
+                        LlamaSelfAttention(
+                            self.config, self.env, self.policy, i, False, partial_weight_ratio, alpha, max_num_kv
+                        )
+                    )
                 else:
-                    layers.append(LlamaSelfAttention(self.config, self.env, self.policy, i, True, partial_weight_ratio, alpha, max_num_kv))
+                    layers.append(
+                        LlamaSelfAttention(
+                            self.config, self.env, self.policy, i, True, partial_weight_ratio, alpha, max_num_kv
+                        )
+                    )
                 self.attn_layer.append(len(layers) - 1)
                 layers.append(LlamaMLP(self.config, self.env, self.policy, i))
             else:
@@ -443,6 +470,12 @@ class LlamaLM(OptLM):
         self.layers[j].init_weight(self.weight_manager, self.weight_home[j], expanded_path)
 
 
+def get_test_inputs(prompt_len, num_prompts, tokenizer):
+    prompts = ["Write a 30000-word article on the history of the Roman Empire."]
+    input_ids = tokenizer(prompts, padding="max_length", max_length=prompt_len).input_ids
+    return (input_ids[0],) * num_prompts
+
+
 def run_flexgen(args):
     print(f"<run_flexgen>: args.model: {args.model}")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True, padding_side="left")
@@ -451,8 +484,8 @@ def run_flexgen(args):
     prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
 
     # Task and policy
-    warmup_inputs = get_inputs(2048, num_prompts, tokenizer, args.warmup_input_path)
-    inputs = get_inputs(prompt_len, num_prompts, tokenizer, args.test_input_path)
+    warmup_inputs = get_test_inputs(32, num_prompts, tokenizer)
+    inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
 
     gpu = LlamaTorchDevice("cuda:0")
     cpu = LlamaTorchDevice("cpu")

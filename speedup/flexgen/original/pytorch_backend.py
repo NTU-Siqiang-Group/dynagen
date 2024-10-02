@@ -111,10 +111,7 @@ class TorchTensor:
 
     def delete(self):
         assert self.device is not None, "already deleted"
-        if (
-            self.device.device_type == DeviceType.DISK
-            or self.device.device_type == DeviceType.MIXED
-        ):
+        if self.device.device_type == DeviceType.DISK or self.device.device_type == DeviceType.MIXED:
             self.device.delete(self)
         self.device = self.data = None
 
@@ -1106,7 +1103,6 @@ class LlamaTorchDevice(TorchDevice):
         b, s, h = inputs.shape
         head_dim = h // n_head
         scaling = head_dim**-0.5
-
         hidden = rms_norm(inputs.data, weight=w_ln.data, eps=eps)
 
         # shape: (b, s, h)

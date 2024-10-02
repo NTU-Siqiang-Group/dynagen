@@ -111,7 +111,14 @@ class LlamaOutputEmbed(OutputEmbed):
             (w_ln, _), (w_token, _) = weight_read_buf.val
 
         h = self.compute.llama_output_embed(
-            h, w_ln, w_token, self.config.rms_norm_eps, donate, do_sample=True, temperature=0.5, evaluate=self.task.evaluate
+            h,
+            w_ln,
+            w_token,
+            self.config.rms_norm_eps,
+            donate,
+            do_sample=True,
+            temperature=0.5,
+            evaluate=self.task.evaluate,
         )
         hidden.val = h
 
@@ -151,6 +158,7 @@ class LlamaSelfAttention(SelfAttention):
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
+            print("w_ln:", w_ln.shape)
             weight_read_buf.store(
                 (
                     w_ln.smart_copy(dst2),
@@ -184,7 +192,7 @@ class LlamaSelfAttention(SelfAttention):
 
         if i == 0:  # prefill
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-            position_ids = torch.cumsum(mask.data, dim=1).long() * mask.data + 1
+            position_ids = torch.cumsum(mask.data, dim=1).int() * mask.data + 1
             h, new_k_cache, new_v_cache = self.compute.llama_mha(
                 h,
                 position_ids,
