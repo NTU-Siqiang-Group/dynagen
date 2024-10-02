@@ -1,6 +1,18 @@
 import torch
 
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    seqlen, num_key_value_heads, head_dim) to (batch, seqlen, num_attention_heads, head_dim)
+    """
+    batch, slen, num_key_value_heads, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, :, None, :].expand(batch, slen, num_key_value_heads, n_rep, head_dim)
+    return hidden_states.reshape(batch, slen, num_key_value_heads * n_rep, head_dim)
+
+
 def weight_bias_concat(weight, bias, scaling=False, head_dim=1.0):
     """Concatenates the weight matrix and bias.
 
@@ -47,8 +59,8 @@ def reform_hidden_states(hidden_states):
     )
 
 
-def skew(query, key, wq, wk, n_head, head_dim):
-    """Manipulates the query/key weight matrix for skewing the qeury and key matrix.
+def skew(query, key, wq, wk, n_head, head_dim, n_kv_groups=None):
+    """Manipulates the query/key weight matrix for skewing the query and key matrix.
 
     On the warmup phase, manipulates the query/key weight matrix for
     skewing the query and key matrix. By doing so, a few columns of
@@ -57,17 +69,22 @@ def skew(query, key, wq, wk, n_head, head_dim):
 
     Args:
         query: Query matrix (b, n, h, d)
-        key: Key matrix (b, n, h, d)
-        w_q: Concatenated query weight and bias (D, D+1)
-        w_k: Concatenated key weight and bias (D, D+1)
+        key: Key matrix (b, n, h / n_kv_groups, d)
+        w_q: query weight (D, D)
+        w_k: key weight (D / n_kv_groups, D)
         n_head: Number of heads which we refer to as h
         head_dim: Hidden dimension of each head which we refer to as d
+        n_kv_groups: Number of key/value groups
 
     Returns:
-        w_q: Manipulated w_q (D, D+1)
-        w_k: Manipulated w_k (D, D+1)
+        w_q: Manipulated w_q (D, D)
+        w_k: Manipulated w_k (D, D)
 
     """
+
+    if n_kv_groups is not None:
+        key = repeat_kv(key, n_kv_groups)
+        wk = wk.repeat(n_kv_groups, 1)
 
     for h_idx in range(n_head):
         start = h_idx * head_dim

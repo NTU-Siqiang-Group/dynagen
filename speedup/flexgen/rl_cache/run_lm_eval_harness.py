@@ -43,46 +43,22 @@ def init_flexgen(args, tokenizer):
 
     opt_config = get_opt_config(args.model)
     model = OptLM(opt_config, env, args.path, policy)
-    model.generate(0, warmup_inputs, max_new_tokens=1)
-    return model, env, policy
+    model.generate(warmup_inputs, max_new_tokens=1)
+    return model, env
 
-def run_flexgen(model, tokenizer, prompt, policy):
-    batch_sizes = [1]
-    nums_gpu_batches = [1]
-    cache_gpu_percents = [100]
-    w_gpu_percents = [100]
-
+def run_flexgen(model, tokenizer, prompt):
     # Task and policy
-    for batch_idx, (
-        batch_size,
-        num_gpu_batches,
-        cache_gpu_percent,
-        w_gpu_percents,
-    ) in enumerate(
-        zip(batch_sizes, nums_gpu_batches, cache_gpu_percents, w_gpu_percents)
-    ):
-        assert batch_size == 1 and num_gpu_batches == 1
+    inputs = get_inputs(tokenizer, prompt)
+    print("len(inputs):", len(inputs))
 
-        if batch_idx == len(batch_sizes) - 1:
-            batch_idx = -1
-        policy.gpu_batch_size = batch_size
-        policy.num_gpu_batches = num_gpu_batches
-        policy.cache_gpu_percent = cache_gpu_percent
-        policy.cache_cpu_percent = 100 - cache_gpu_percent
-        policy.w_gpu_percent = w_gpu_percents
-        policy.w_cpu_percent = 100 - w_gpu_percents
-        inputs = get_inputs(tokenizer, prompt)
-        print("len(inputs):", len(inputs))
-        print("policy:", policy)
-        logits = model.generate(
-            batch_idx,
-            policy,
-            inputs,
-            max_new_tokens=1,
-            cut_gen_len=1,
-            evaluate=True
-        )
-    
+    timers("generate").reset()
+    logits = model.generate(
+        inputs,
+        max_new_tokens=1,
+        cut_gen_len=1,
+        evaluate=True
+    )
+
     return logits
 
 if __name__ == "__main__":
@@ -108,7 +84,7 @@ if __name__ == "__main__":
         tokenizer = AutoTokenizer.from_pretrained("facebook/galactica-30b", padding_side="left")
     else:
         tokenizer = AutoTokenizer.from_pretrained("facebook/opt-30b", padding_side="left")
-    model, env, policy = init_flexgen(args, tokenizer)
+    model, env = init_flexgen(args, tokenizer)
 
     requests = []
     with open(input_path, "r") as f:
@@ -127,7 +103,7 @@ if __name__ == "__main__":
                 input_ids = tokenizer(
                     prompt, add_special_tokens=False, return_tensors="pt"
                 ).input_ids
-                logits = run_flexgen(model, tokenizer, prompt, policy).log_softmax(dim=-1)
+                logits = run_flexgen(model, tokenizer, prompt).log_softmax(dim=-1)
 
                 values, indices = logits.squeeze(0).topk(dim=-1, k=1)
                 tokens = tokenizer.convert_ids_to_tokens(input_ids.squeeze(0))

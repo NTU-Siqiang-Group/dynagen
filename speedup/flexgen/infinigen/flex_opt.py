@@ -285,14 +285,6 @@ class SelfAttention:
         weight_specs = self.get_weight_specs(path)
         weight_manager.init_cpu_weight(weight_specs, self.policy)
 
-        # # WQ
-        # head_dim = h // self.config.n_head
-        # weights[0].data = weight_bias_concat(weights[0].data, weights[1].data, True, head_dim)
-        # weights[0].shape = (h, h+1)
-        # # WK
-        # weights[2].data = weight_bias_concat(weights[2].data, weights[3].data)
-        # weights[2].shape = (h, h+1)
-
         weight_home.store([None] * len(weight_specs))
 
     def set_weight(self, weight_manager, weight_home, path):
@@ -615,6 +607,11 @@ class TransformerLayer:
         self.mlp.init_weight(weight_manager, home2, path)
         weight_home.store((home1, home2))
 
+    def set_weight(self, weight_manager, weight_home, path):
+        home1, home2 = weight_home.val
+        self.attention.set_weight(weight_manager, home1, path)
+        self.mlp.set_weight(weight_manager, home2, path)
+
     def load_weight(self, weight_home, weight_read_buf, k):
         read_buf1, read_buf2 = ValueHolder(), ValueHolder()
         home1, home2 = weight_home.val
@@ -719,6 +716,14 @@ class OptLM:
         self.task = None
         self.weight_manager = TorchCPUWeightTensorManager(self.env)
         self.init_all_weights()
+
+    def set_policy(self, policy):
+        self.policy = policy
+        self.weight_load_dst = (
+            self.compute.compressed_device if policy.compress_weight else self.compute
+        )
+        for l in self.layers:
+            l.policy = policy
 
     def set_task(self, task):
         self.task = task
@@ -1318,6 +1323,7 @@ def get_filename(args):
     if args.compress_cache:
         filename += "-compc"
     return filename
+
 
 
 def get_inputs(prompt_len, num_prompts, tokenizer, path):

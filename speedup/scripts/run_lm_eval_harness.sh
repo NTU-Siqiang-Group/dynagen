@@ -9,14 +9,17 @@ budget=$8
 no_skewing=${9}
 
 FLEXGEN_PATH=$PWD/../flexgen
-for SCHEME in "original" "h2o" "infinigen" "rl_cache"
+# for SCHEME in "original" "h2o" "infinigen" "rl_cache"
+for SCHEME in "rl_cache"
 do
   echo "================== Evaluating scheme: $SCHEME =================="
 
   rm $FLEXGEN_PATH/flexgen/flex_opt.py
+  rm $FLEXGEN_PATH/flexgen/flex_llama.py
   rm $FLEXGEN_PATH/flexgen/pytorch_backend.py
   rm $FLEXGEN_PATH/flexgen/run_lm_eval_harness.py
   ln -s $FLEXGEN_PATH/$SCHEME/flex_opt.py $FLEXGEN_PATH/flexgen/flex_opt.py
+  ln -s $FLEXGEN_PATH/$SCHEME/flex_llama.py $FLEXGEN_PATH/flexgen/flex_llama.py
   ln -s $FLEXGEN_PATH/$SCHEME/pytorch_backend.py $FLEXGEN_PATH/flexgen/pytorch_backend.py
   ln -s $FLEXGEN_PATH/$SCHEME/run_lm_eval_harness.py $FLEXGEN_PATH/flexgen/run_lm_eval_harness.py
 

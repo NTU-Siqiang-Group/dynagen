@@ -1236,8 +1236,7 @@ class OptLM:
         policy.w_gpu_percent = w_gpu_percents[0]
         policy.w_cpu_percent = 100 - w_gpu_percents[0]
         self.set_weight()
-        for k in range(self.policy.num_gpu_batches):
-            self.load_weight(0, 0, k)
+        self.load_weight(0, 0, 0)
         self.sync()
 
         # Generate
@@ -1254,6 +1253,7 @@ class OptLM:
                     self.sync()
                     break
                 self.store_cache(i, j - 1, 0)
+                # FIXME
                 self.store_hidden(i, j, 0)
                 self.sync()
             if i + 1 < len(batch_sizes):
@@ -1279,30 +1279,25 @@ class OptLM:
         else:
             self.keep_load_gpu_weight = False
         # Prologue
+        batch_sizes = [2, 2, 2, 2, 2]
+        cache_gpu_percents = [100, 100, 100, 100, 100]
+        w_gpu_percents = [20, 40, 60, 80, 100]
         policy = self.policy
+        policy.gpu_batch_size = batch_sizes[0]
+        policy.cache_gpu_percent = cache_gpu_percents[0]
+        policy.cache_cpu_percent = 100 - cache_gpu_percents[0]
+        policy.w_gpu_percent = w_gpu_percents[0]
+        policy.w_cpu_percent = 100 - w_gpu_percents[0]
+        self.set_weight()
         for k in range(self.policy.num_gpu_batches):
             self.load_weight(0, 0, k)
         self.load_hidden(0, 0, 0)
         self.sync()
 
         # Generate
-        batch_sizes = [2, 2, 2, 2, 2]
-        # num_gpu_batches is impossible to change within a generation_loop
-        # nums_gpu_batches = [2, 2, 2, 2, 2]
-        cache_gpu_percents = [100, 100, 100, 100, 100]
-        w_gpu_percents = [20, 40, 60, 80, 100]
 
         for i in range(self.execute_gen_len):
             timers("generate").start()
-            if i < len(batch_sizes):
-                policy.gpu_batch_size = batch_sizes[i]
-                policy.cache_gpu_percent = cache_gpu_percents[i]
-                policy.cache_cpu_percent = 100 - cache_gpu_percents[i]
-                policy.w_gpu_percent = w_gpu_percents[i]
-                policy.w_cpu_percent = 100 - w_gpu_percents[i]
-                print("policy:", policy)
-                self.set_policy(policy)
-                self.set_weight()
             for k in range(self.policy.num_gpu_batches):
                 self.update_attention_mask(i, k)
             for j in range(self.num_layers):
@@ -1314,6 +1309,15 @@ class OptLM:
                     self.compute_layer(i, j, k)
                     self.store_cache(i, j, k - 1)
                     self.sync()
+            if i + 1 < len(batch_sizes):
+                policy.gpu_batch_size = batch_sizes[i + 1]
+                policy.cache_gpu_percent = cache_gpu_percents[i + 1]
+                policy.cache_cpu_percent = 100 - cache_gpu_percents[i + 1]
+                policy.w_gpu_percent = w_gpu_percents[i + 1]
+                policy.w_cpu_percent = 100 - w_gpu_percents[i + 1]
+                print("policy:", policy)
+                self.set_policy(policy)
+                self.set_weight()
             timers("generate").stop()
 
         # Epilogue
