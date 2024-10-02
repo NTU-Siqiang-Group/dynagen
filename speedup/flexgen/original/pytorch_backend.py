@@ -8,7 +8,6 @@ import queue
 import shutil
 import time
 import threading
-import math
 from typing import Optional, Union, Tuple
 
 import torch
@@ -1121,8 +1120,6 @@ class LlamaTorchDevice(TorchDevice):
 
         kv_seq_len = k.shape[-3]
         cos, sin = rotary_embedding(v, w_re.data, seq_len=kv_seq_len)
-        # rotary_emb = LlamaLlama3ScalingRotaryEmbedding(head_dim).to("cuda")
-        # cos, sin = rotary_emb(v, seq_len=kv_seq_len)
         q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
 
         n_kv_groups = n_head // n_kv_head
@@ -1222,8 +1219,6 @@ class LlamaTorchDevice(TorchDevice):
         v = v.view(b, tgt_s, n_kv_head, head_dim)
 
         cos, sin = rotary_embedding(v, w_re.data, seq_len=position_ids.max().item() + 1)
-        # rotary_emb = LlamaLlama3ScalingRotaryEmbedding(head_dim).to("cuda")
-        # cos, sin = rotary_emb(v, seq_len=position_ids.max().item() + 1)
         q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
 
         n_kv_groups = n_head // n_kv_head

@@ -152,7 +152,7 @@ def _download_llama_weights(model_name, org_name, path, hf_token):
             name = name.replace("model.", "")
             param_path = os.path.join(path, name)
             if param.dtype == torch.bfloat16:
-                param = param.to(torch.float16)  
+                param = param.to(torch.float16)
             with open(param_path, "wb") as f:
                 np.save(f, param.cpu().detach().numpy())
 
@@ -163,7 +163,7 @@ def _download_llama_weights(model_name, org_name, path, hf_token):
                 name = name.replace("model.", "")
                 param_path = os.path.join(path, name)
                 if param.dtype == torch.bfloat16:
-                    param = param.to(torch.float16) 
+                    param = param.to(torch.float16)
                 with open(param_path, "wb") as f_out:
                     np.save(f_out, param.cpu().detach().numpy())
 
