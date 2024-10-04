@@ -1148,12 +1148,13 @@ class LlamaTorchDevice(TorchDevice):
             partial_weight_index = partial_weight_index_generation(q, n_head, head_dim, partial_weight_ratio)
         # shape: (b, s, n_head, head_dim)
         q = q.view(b, s, n_head, head_dim)
-        k = k.view(b, s, n_kv_head, head_dim)
+        k = k.view(b, s, n_kv_head if warmup else n_head, head_dim)
         v = v.view(b, s, n_kv_head, head_dim)
 
         # Generate skewing matrix
         if warmup:
             w_q.data, w_k.data = skew(q, k, w_q.data, w_k.data, n_head, head_dim, n_kv_groups)
+            w_k.shape = w_k.data.shape
 
         kv_seq_len = k.shape[-3]
         cos, sin = rotary_embedding(v, w_re.data, seq_len=kv_seq_len)
@@ -1161,7 +1162,8 @@ class LlamaTorchDevice(TorchDevice):
         # cos, sin = rotary_emb(v, seq_len=kv_seq_len)
         q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
 
-        k = repeat_kv(k, n_kv_groups)
+        if warmup:
+            k = repeat_kv(k, n_kv_groups)
         v = repeat_kv(v, n_kv_groups)
 
         # shape: (b * n_head, s, head_dim)
@@ -1263,7 +1265,7 @@ class LlamaTorchDevice(TorchDevice):
         v = F.linear(hidden, w_v.data)
         # shape: (b, 1, n_head, head_dim)
         q = q.view(b, tgt_s, n_head, head_dim)
-        k = k.view(b, tgt_s, n_kv_head, head_dim)
+        k = k.view(b, tgt_s, n_head, head_dim)
         v = v.view(b, tgt_s, n_kv_head, head_dim)
 
         cos, sin = rotary_embedding(v, w_re.data, seq_len=position_ids.max().item() + 1)
@@ -1272,7 +1274,6 @@ class LlamaTorchDevice(TorchDevice):
         q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
 
         n_kv_groups = n_head // n_kv_head
-        k = repeat_kv(k, n_kv_groups)
         v = repeat_kv(v, n_kv_groups)
 
         # shape: (b * n_head, 1, head_dim)

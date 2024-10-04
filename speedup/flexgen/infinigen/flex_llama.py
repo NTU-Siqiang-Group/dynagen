@@ -276,35 +276,61 @@ class LlamaSelfAttention(SelfAttention):
         else:  # decoding
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
             (k_cache, donate[8]), (v_cache, donate[9]) = cache_read_buf.pop()
-            if self.enable_prefetching:
-                partial_k_cache = partial_cache_read_buf.val
             position_ids = torch.cumsum(mask.data, dim=1).int() * mask.data + 1
             position_ids = position_ids[:, -h.shape[1]].unsqueeze(1)
-            h, new_k_cache, new_v_cache, self.prefetch_idx = self.compute.llama_mha_gen(
-                h,
-                position_ids,
-                mask,
-                w_ln,
-                w_q,
-                w_k,
-                w_v,
-                w_re,
-                w_o,
-                self.config.rms_norm_eps,
-                n_head,
-                n_kv_head,
-                k_cache,
-                v_cache,
-                donate,
-                self.policy.attn_sparsity,
-                self.policy.compress_cache,
-                self.policy.comp_cache_config,
-                p_w_q,
-                partial_k_cache,
-                speculation_stream,
-                self.alpha,
-                self.max_num_kv,
-            )
+            if self.enable_prefetching:
+                partial_k_cache = partial_cache_read_buf.val
+                h, new_k_cache, new_v_cache, self.prefetch_idx = self.compute.llama_mha_gen(
+                    h,
+                    position_ids,
+                    mask,
+                    w_ln,
+                    w_q,
+                    w_k,
+                    w_v,
+                    w_re,
+                    w_o,
+                    self.config.rms_norm_eps,
+                    n_head,
+                    n_kv_head,
+                    k_cache,
+                    v_cache,
+                    donate,
+                    self.policy.attn_sparsity,
+                    self.policy.compress_cache,
+                    self.policy.comp_cache_config,
+                    p_w_q,
+                    partial_k_cache,
+                    speculation_stream,
+                    self.alpha,
+                    self.max_num_kv,
+                )
+            else:
+                h, new_k_cache, new_v_cache, self.prefetch_idx = self.compute.llama_mha_gen(
+                    h,
+                    position_ids,
+                    mask,
+                    w_ln,
+                    w_q,
+                    w_k,
+                    w_v,
+                    w_re,
+                    w_o,
+                    self.config.rms_norm_eps,
+                    n_head,
+                    n_kv_head,
+                    k_cache,
+                    v_cache,
+                    donate,
+                    self.policy.attn_sparsity,
+                    self.policy.compress_cache,
+                    self.policy.comp_cache_config,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
 
             cache_write_buf.store((new_k_cache, new_v_cache))
             if (prev_partial_cache_read_buf is not None) and (self.layer_id > 1):

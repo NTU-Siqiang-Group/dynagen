@@ -1230,7 +1230,7 @@ class OptLM:
             self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
 
         # Generate
-        self.generation_loop_overlap_single_batch(evaluate)
+        self.generation_loop_normal(evaluate)
         # if debug_mode is None:
         #     if not overlap:
         #         # No overlap, easy to understand, suitable for debugging
@@ -1600,11 +1600,20 @@ def run_flexgen(args):
     opt_config = get_opt_config(args.model)
     cache_size = opt_config.cache_bytes(num_prompts, prompt_len + gen_len)
     hidden_size = opt_config.hidden_bytes(num_prompts, prompt_len + gen_len)
+    print(
+        f"model size: {opt_config.model_bytes()/GB:.3f} GB, "
+        f"cache size: {cache_size/GB:.3f} GB, "
+        f"hidden size (prefill): {hidden_size/GB:.3f} GB"
+    )
+
+    print("init weight...")
     model = OptLM(opt_config, env, args.path, policy, args.partial_weight_ratio, args.alpha, args.max_num_kv)
 
     try:
+        print("warmup - generate")
         output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose, warmup=True)
 
+        print("benchmark - generate")
         timers("generate").reset()
         output_ids = model.generate(
             inputs,
@@ -1631,6 +1640,17 @@ def run_flexgen(args):
     _, gpu_peak_mem = gpu.mem_stats()
     _, cpu_peak_mem = cpu.mem_stats()
 
+    if DUMMY_WEIGHT not in args.path:
+        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+        show_str = "Outputs:\n" + 70 * "-" + "\n"
+        for i in [0, len(outputs) - 1]:
+            show_str += f"{i}: {outputs[i]}\n"
+            show_str += "-" * 70 + "\n"
+        if args.verbose >= 2:
+            print(show_str)
+
+    gpu.print_stats()
+    cpu.print_stats()
     projected = bool(args.debug_mode or cut_gen_len)
 
     print("+++++++++++++++++++++++++++++++++++++++++++++++++")
@@ -1694,6 +1714,7 @@ def add_parser_arguments(parser):
 
 
 if __name__ == "__main__":
+    os.chdir(os.path.dirname(os.path.realpath(__file__)))
     parser = argparse.ArgumentParser()
     add_parser_arguments(parser)
     args = parser.parse_args()
