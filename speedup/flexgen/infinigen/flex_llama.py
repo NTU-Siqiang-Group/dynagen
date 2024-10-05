@@ -66,9 +66,9 @@ class LlamaInputEmbed(InputEmbed):
 
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         (w_token,) = weight_home.val
@@ -84,7 +84,7 @@ class LlamaInputEmbed(InputEmbed):
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            ((w_token, donate[2]),) = weight_read_buf.pop()
+            ((w_token, donate[2]),) = weight_read_buf.val
         else:
             ((w_token, _),) = weight_read_buf.val
 
@@ -112,9 +112,9 @@ class LlamaOutputEmbed(OutputEmbed):
 
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, w_token = weight_home.val
@@ -129,7 +129,7 @@ class LlamaOutputEmbed(OutputEmbed):
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            (w_ln, donate[1]), (w_token, donate[2]) = weight_read_buf.pop()
+            (w_ln, donate[1]), (w_token, donate[2]) = weight_read_buf.val
         else:
             (w_ln, _), (w_token, _) = weight_read_buf.val
 
@@ -181,9 +181,9 @@ class LlamaSelfAttention(SelfAttention):
         weight_manager.init_cpu_weight(weight_specs, self.policy)
         weight_home.store(([None] * len(weight_specs)))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, w_q, w_k, w_v, w_re, w_o = weight_home.val
@@ -236,7 +236,7 @@ class LlamaSelfAttention(SelfAttention):
                 (w_v, donate[5]),
                 (w_re, donate[6]),
                 (w_o, donate[7]),
-            ) = weight_read_buf.pop()
+            ) = weight_read_buf.val
         else:
             ((w_ln, _), (w_q, _), (w_k, _), (w_v, _), (w_re, _), (w_o, _)) = weight_read_buf.val
         if self.enable_prefetching and (i > 0):
@@ -367,9 +367,9 @@ class LlamaMLP(MLP):
         weight_manager.init_cpu_weight(weight_specs, self.policy)
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, w_g, w_u, w_d = weight_home.val
@@ -386,7 +386,7 @@ class LlamaMLP(MLP):
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            ((w_ln, donate[1]), (w_g, donate[2]), (w_u, donate[3]), (w_d, donate[4])) = weight_read_buf.pop()
+            ((w_ln, donate[1]), (w_g, donate[2]), (w_u, donate[3]), (w_d, donate[4])) = weight_read_buf.val
         else:
             ((w_ln, _), (w_g, _), (w_u, _), (w_d, _)) = weight_read_buf.val
 

@@ -133,9 +133,9 @@ class InputEmbed:
 
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_token, w_pos = weight_home.val
@@ -162,8 +162,7 @@ class InputEmbed:
         mask, donate[1] = attention_mask.val.smart_copy(self.compute)
 
         if k == self.policy.num_gpu_batches - 1:
-            # Clear the weight_read_buf if it is the last gpu batch
-            (w_token, donate[2]), (w_pos, donate[3]) = weight_read_buf.pop()
+            (w_token, donate[2]), (w_pos, donate[3]) = weight_read_buf.val
         else:
             (w_token, _), (w_pos, _) = weight_read_buf.val
 
@@ -202,9 +201,9 @@ class OutputEmbed:
 
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, b_ln, w_token = weight_home.val
@@ -231,7 +230,7 @@ class OutputEmbed:
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            (w_ln, donate[1]), (b_ln, donate[2]), (w_token, donate[3]) = weight_read_buf.pop()
+            (w_ln, donate[1]), (b_ln, donate[2]), (w_token, donate[3]) = weight_read_buf.val
         else:
             (w_ln, _), (b_ln, _), (w_token, _) = weight_read_buf.val
 
@@ -313,12 +312,12 @@ class SelfAttention:
 
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
         h = self.config.input_dim
         weight_specs[0] = ((h, h + 1), *weight_specs[0][1:])
         weight_specs[2] = ((h, h + 1), *weight_specs[2][1:])
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight_home.val
@@ -555,7 +554,7 @@ class SelfAttention:
                 (b_out, donate[9]),
                 (w_ln, donate[10]),
                 (b_ln, donate[11]),
-            ) = weight_read_buf.pop()
+            ) = weight_read_buf.val
         else:
             (
                 (w_q, _),
@@ -711,9 +710,9 @@ class MLP:
         weight_manager.init_cpu_weight(weight_specs, self.policy)
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         wi, bi, wo, bo, w_ln, b_ln = weight_home.val
@@ -756,7 +755,7 @@ class MLP:
                 (bo, donate[4]),
                 (w_ln, donate[5]),
                 (b_ln, donate[6]),
-            ) = weight_read_buf.pop()
+            ) = weight_read_buf.val
         else:
             ((wi, _), (bi, _), (wo, _), (bo, _), (w_ln, _), (b_ln, _)) = weight_read_buf.val
 
@@ -781,10 +780,10 @@ class TransformerLayer:
         self.mlp.init_weight(weight_manager, home2, path)
         weight_home.store((home1, home2))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         home1, home2 = weight_home.val
-        self.attention.set_weight(weight_manager, home1, path)
-        self.mlp.set_weight(weight_manager, home2, path)
+        self.attention.set_weight(weight_manager, home1, weight_read_buf, path)
+        self.mlp.set_weight(weight_manager, home2, weight_read_buf, path)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         read_buf1, read_buf2 = ValueHolder(), ValueHolder()
@@ -804,10 +803,7 @@ class TransformerLayer:
         self.attention.store_cache(cache_home, cache_write_buf, i)
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
-        if k == self.policy.num_gpu_batches - 1:
-            read_buf1, read_buf2 = weight_read_buf.pop()
-        else:
-            read_buf1, read_buf2 = weight_read_buf.val
+        read_buf1, read_buf2 = weight_read_buf.val
 
         self.attention.forward(hidden, cache_read_buf, read_buf1, attention_mask, cache_write_buf, i, k)
         self.mlp.forward(hidden, None, read_buf2, attention_mask, None, i, k)
@@ -920,7 +916,7 @@ class OptLM:
     def set_weight(self):
         expanded_path = os.path.abspath(os.path.expanduser(os.path.join(self.path, f"{self.config.name}-np")))
         for j in range(self.num_layers):
-            self.layers[j].set_weight(self.weight_manager, self.weight_home[j], expanded_path)
+            self.layers[j].set_weight(self.weight_manager, self.weight_home[j], self.weight_read_buf[j], expanded_path)
 
     def load_weight(self, i, j, k, overlap=True):
         # Handle corner cases
@@ -1196,7 +1192,6 @@ class OptLM:
         prompt_len, gen_len = task.prompt_len, task.gen_len
         self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
         self.warmup = warmup
-        self.set_weight()
 
         # Output token ids
         self.output_ids = np.full((len(task.inputs), prompt_len + gen_len), self.config.pad_token_id, dtype=np.int32)
@@ -1267,6 +1262,8 @@ class OptLM:
         return self.output_ids
 
     def generation_loop_normal(self, evaluate):
+        self.set_weight()
+
         for i in range(self.execute_gen_len):
             timers("generate").start()
             for k in range(self.num_gpu_batches):
@@ -1290,6 +1287,7 @@ class OptLM:
                     if j in self.attn_layer[1:-1] and (i > 0):
                         self.prefetch_cache(i, j, k, overlap=True)
                         self.prefetch_evt.record()
+            self.set_weight()
             timers("generate").stop()
 
     def generation_loop_debug_normal(self):
@@ -1377,8 +1375,8 @@ class OptLM:
 
     def generation_loop_overlap_single_batch(self, evaluate):
         # Prologue
-        for k in range(self.num_gpu_batches):
-            self.load_weight(0, 0, k)
+        self.set_weight()
+        self.load_weight(0, 0, 0)
         self.sync()
 
         # Generate
@@ -1396,6 +1394,7 @@ class OptLM:
                 self.store_cache(i, j - 1, 0)
                 self.store_hidden(i, j, 0)
                 self.sync()
+            self.set_weight()
             timers("generate").stop()
 
             if self.task.stop and np.all(self.stopped):
@@ -1403,6 +1402,7 @@ class OptLM:
 
     def generation_loop_overlap_multi_batch(self):
         # Prologue
+        self.set_weight()
         for k in range(self.num_gpu_batches):
             self.load_weight(0, 0, k)
         self.load_hidden(0, 0, 0)
@@ -1422,6 +1422,7 @@ class OptLM:
                     self.compute_layer(i, j, k)
                     self.store_cache(i, j, k - 1)
                     self.sync()
+            self.set_weight()
             timers("generate").stop()
 
         # Epilogue

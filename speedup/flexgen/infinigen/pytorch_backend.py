@@ -1533,7 +1533,7 @@ class TorchCPUWeightTensorManager:
             assert isinstance(tensor, torch.Tensor)
             self._get_cpu_weight(key, compress, shape, dtype, policy.comp_weight_config, tensor)
 
-    def set_weight_home(self, weight_home: ValueHolder, weight_specs: List[Tuple], policy):
+    def set_weight_home(self, weight_home: ValueHolder, weight_specs: List[Tuple], weight_read_buf: ValueHolder, policy):
         self._init_cpu_weight_percent_cumsum(policy.compress_weight)
 
         dev_percents = (policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent)
@@ -1555,9 +1555,17 @@ class TorchCPUWeightTensorManager:
 
             if weight_home.val[i] is not None:
                 if home.device_type == weight_home.val[i].device.device_type:
+                    # The weight is already loaded on the correct device, skip
                     continue
                 if weight_home.val[i].device.device_type != DeviceType.CPU:
+                    # The weight is loaded on a different device other than CPU, delete it
                     weight_home.val[i].delete()
+
+                (buffered_weight, _) = weight_read_buf.val[i]
+                if buffered_weight is not None and home.device_type == buffered_weight.device.device_type:
+                    # The weight is already buffered on the correct device, append it and continue
+                    weight_home.val[i] = buffered_weight
+                    continue
 
             if len(shape) < 2:
                 pin_memory = True
@@ -1585,3 +1593,5 @@ class TorchCPUWeightTensorManager:
                 # GPU is chosen, copy from cpu_weight
                 general_copy(weight, None, cpu_weight, None)
             weight_home.val[i] = weight
+
+        weight_read_buf.clear()
