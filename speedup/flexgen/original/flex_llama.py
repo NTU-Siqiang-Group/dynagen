@@ -158,7 +158,6 @@ class LlamaSelfAttention(SelfAttention):
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
-            print("w_ln:", w_ln.shape)
             weight_read_buf.store(
                 (
                     w_ln.smart_copy(dst2),

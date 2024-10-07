@@ -1148,22 +1148,19 @@ class LlamaTorchDevice(TorchDevice):
             partial_weight_index = partial_weight_index_generation(q, n_head, head_dim, partial_weight_ratio)
         # shape: (b, s, n_head, head_dim)
         q = q.view(b, s, n_head, head_dim)
-        k = k.view(b, s, n_kv_head if warmup else n_head, head_dim)
+        k = k.view(b, s, n_kv_head, head_dim)
         v = v.view(b, s, n_kv_head, head_dim)
 
         # Generate skewing matrix
-        if warmup:
-            w_q.data, w_k.data = skew(q, k, w_q.data, w_k.data, n_head, head_dim, n_kv_groups)
-            w_k.shape = w_k.data.shape
+        # if warmup:
+        #     w_q.data, w_k.data = skew(q, k, w_q.data, w_k.data, n_head, head_dim, n_kv_groups)
+        #     w_k.shape = w_k.data.shape
 
         kv_seq_len = k.shape[-3]
         cos, sin = rotary_embedding(v, w_re.data, seq_len=kv_seq_len)
-        # rotary_emb = LlamaLlama3ScalingRotaryEmbedding(head_dim).to("cuda")
-        # cos, sin = rotary_emb(v, seq_len=kv_seq_len)
         q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
 
-        if warmup:
-            k = repeat_kv(k, n_kv_groups)
+        k = repeat_kv(k, n_kv_groups)
         v = repeat_kv(v, n_kv_groups)
 
         # shape: (b * n_head, s, head_dim)
@@ -1265,15 +1262,14 @@ class LlamaTorchDevice(TorchDevice):
         v = F.linear(hidden, w_v.data)
         # shape: (b, 1, n_head, head_dim)
         q = q.view(b, tgt_s, n_head, head_dim)
-        k = k.view(b, tgt_s, n_head, head_dim)
+        k = k.view(b, tgt_s, n_kv_head, head_dim)
         v = v.view(b, tgt_s, n_kv_head, head_dim)
 
         cos, sin = rotary_embedding(v, w_re.data, seq_len=position_ids.max().item() + 1)
-        # rotary_emb = LlamaLlama3ScalingRotaryEmbedding(head_dim).to("cuda")
-        # cos, sin = rotary_emb(v, seq_len=position_ids.max().item() + 1)
         q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
 
         n_kv_groups = n_head // n_kv_head
+        k = repeat_kv(k, n_kv_groups)
         v = repeat_kv(v, n_kv_groups)
 
         # shape: (b * n_head, 1, head_dim)
@@ -1305,7 +1301,7 @@ class LlamaTorchDevice(TorchDevice):
 
                 if k.is_cuda:
                     # TODO: Check infinigen correctness
-                    value = self._attention_value(q, k, v, None, b, src_s, tgt_s, n_head, head_dim)
+                    value = self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
                 else:
                     q = q.float().cpu()
                     k, v = k.float(), v.float()
@@ -1533,7 +1529,9 @@ class TorchCPUWeightTensorManager:
             assert isinstance(tensor, torch.Tensor)
             self._get_cpu_weight(key, compress, shape, dtype, policy.comp_weight_config, tensor)
 
-    def set_weight_home(self, weight_home: ValueHolder, weight_specs: List[Tuple], weight_read_buf: ValueHolder, policy):
+    def set_weight_home(
+        self, weight_home: ValueHolder, weight_specs: List[Tuple], weight_read_buf: ValueHolder, policy
+    ):
         self._init_cpu_weight_percent_cumsum(policy.compress_weight)
 
         dev_percents = (policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent)

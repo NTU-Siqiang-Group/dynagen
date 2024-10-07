@@ -16,7 +16,7 @@ do
   do
     CMD="--model $MODEL"
     CMD=$CMD" --percent 100 0 0 100 100 0"
-    CMD=$CMD" --overlap false --gpu-batch-size 1 --num-gpu-batches 1 --prompt-len 32 --gen-len 128"
+    CMD=$CMD" --overlap false --gpu-batch-size 1 --num-gpu-batches 1 --prompt-len 32 --gen-len 1024"
     if [ "$SCHEME" = "int4" ]
     then
       CMD=$CMD" --compress-cache"
