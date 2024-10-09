@@ -961,11 +961,11 @@ class OptLM:
         # Load from cache_home to cache_read_buf
         if overlap:
             with torch.cuda.stream(self.load_cache_stream):
-                # if j not in self.attn_layer[2:]:
-                self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
+                if j not in self.attn_layer[2:]:
+                    self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
         else:
-            # if j not in self.attn_layer[2:]:
-            self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
+            if j not in self.attn_layer[2:]:
+                self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
 
     def prefetch_cache(self, i, j, k, overlap=True):
         # Handle corner cases
@@ -1284,9 +1284,9 @@ class OptLM:
                     self.sync()
                     self.store_hidden(i, j, k)
                     self.store_cache(i, j, k, overlap=False)
-                    # if j in self.attn_layer[1:-1] and (i > 0):
-                    #     self.prefetch_cache(i, j, k, overlap=True)
-                    #     self.prefetch_evt.record()
+                    if j in self.attn_layer[1:-1] and (i > 0):
+                        self.prefetch_cache(i, j, k, overlap=True)
+                        self.prefetch_evt.record()
             self.set_weight()
             timers("generate").stop()
 

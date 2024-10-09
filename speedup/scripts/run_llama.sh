@@ -10,7 +10,7 @@ do
   ln -s ../$SCHEME/flex_opt.py $FLEXGEN_PATH/flexgen/flex_opt.py
   ln -s ../$SCHEME/pytorch_backend.py $FLEXGEN_PATH/flexgen/pytorch_backend.py
   
-  # for MODEL in "meta-llama/Llama-2-7b-chat-hf"
+  # for MODEL in "mattshumer/Llama-3-8B-16K"
   # for MODEL in "THUDM/LongWriter-llama3.1-8b"
   for MODEL in "meta-llama/Meta-Llama-3.1-8B-Instruct"
   do
@@ -25,7 +25,7 @@ do
       CMD=$CMD" --max-num-kv 409 --hh-ratio 0.1 --hh-all"
     elif [ "$SCHEME" = "infinigen" ]
     then
-      CMD=$CMD" --warmup-input-path ../pg19_firstbook.txt --test-input-path ../pg19_firstbook.txt --alpha 4 --partial-weight-ratio 0.3 --max-num-kv 409"
+      CMD=$CMD" --warmup-input-path ../pg19_firstbook.txt --test-input-path ../pg19_firstbook.txt --alpha 30 --partial-weight-ratio 0.2 --max-num-kv 8192"
     fi
     python -m flexgen.flex_llama $CMD
   done

@@ -140,7 +140,7 @@ class LlamaOutputEmbed(OutputEmbed):
             self.config.rms_norm_eps,
             donate,
             do_sample=True,
-            temperature=0.5,
+            temperature=0.7,
             evaluate=self.task.evaluate,
         )
         hidden.val = h
@@ -244,8 +244,9 @@ class LlamaSelfAttention(SelfAttention):
 
         if i == 0:  # prefill
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
+            # print(f"mask: {mask.data}")
             position_ids = torch.cumsum(mask.data, dim=1).int() * mask.data + 1
-            h, new_k_cache, new_v_cache, w_q, w_k, self.partial_index = self.compute.llama_mha(
+            h, new_k_cache, new_v_cache, self.skewing_matrix, self.partial_index = self.compute.llama_mha(
                 h,
                 position_ids,
                 mask,
@@ -267,9 +268,11 @@ class LlamaSelfAttention(SelfAttention):
             cache_write_buf.store((new_k_cache, new_v_cache))
             if (prev_partial_cache_read_buf is not None) and (not warmup):
                 prev_partial_cache_read_buf.store(
-                    set_partial_cache(new_k_cache.data, self.partial_index, n_head, head_dim)
+                    set_partial_cache(new_k_cache.data, self.skewing_matrix, self.partial_index, n_head, head_dim)
                 )
-                prev_partial_weight_read_buf.store(set_partial_weight(w_q.data, self.partial_index, n_head, head_dim))
+                prev_partial_weight_read_buf.store(
+                    set_partial_weight(w_q.data, self.skewing_matrix, self.partial_index, n_head, head_dim)
+                )
             # if warmup:
             #     weight_home.val[1] = w_q.smart_copy(weight_home.val[1].device)[0]
             #     weight_home.val[2] = w_k.smart_copy(weight_home.val[2].device)[0]
@@ -337,7 +340,7 @@ class LlamaSelfAttention(SelfAttention):
                 prev_partial_cache_read_buf.val = torch.cat(
                     (
                         prev_partial_cache_read_buf.val,
-                        set_partial_cache(new_k_cache.data, self.partial_index, n_head, head_dim),
+                        set_partial_cache(new_k_cache.data, self.skewing_matrix, self.partial_index, n_head, head_dim),
                     )
                 )
 
@@ -497,7 +500,7 @@ class LlamaLM(OptLM):
 
 
 def get_test_inputs(prompt_len, num_prompts, tokenizer):
-    prompts = ["Write a 30000-word article on the history of the Roman Empire."]
+    prompts = ["Write a 1000-word article on the history of the Roman Empire."]
     input_ids = tokenizer(prompts, padding="max_length", max_length=prompt_len).input_ids
     return (input_ids[0],) * num_prompts
 
@@ -510,7 +513,7 @@ def run_flexgen(args):
     prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
 
     # Task and policy
-    warmup_inputs = get_test_inputs(32, num_prompts, tokenizer)
+    warmup_inputs = get_test_inputs(2048, num_prompts, tokenizer)
     inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
 
     gpu = LlamaTorchDevice("cuda:0")
@@ -585,7 +588,7 @@ def run_flexgen(args):
     if DUMMY_WEIGHT not in args.path:
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
         show_str = "Outputs:\n" + 70 * "-" + "\n"
-        for i in [0, len(outputs) - 1]:
+        for i in [0]:
             show_str += f"{i}: {outputs[i]}\n"
             show_str += "-" * 70 + "\n"
         if args.verbose >= 2:

@@ -33,9 +33,7 @@ def weight_bias_concat(weight, bias, scaling=False, head_dim=1.0):
     weight, bias = weight.data, bias.data
 
     if scaling:
-        return torch.cat((weight, bias.unsqueeze(1).to(weight.device)), dim=1) * (
-            head_dim**-0.5
-        )
+        return torch.cat((weight, bias.unsqueeze(1).to(weight.device)), dim=1) * (head_dim**-0.5)
     else:
         return torch.cat((weight, bias.unsqueeze(1).to(weight.device)), dim=1)
 
@@ -54,9 +52,7 @@ def reform_hidden_states(hidden_states):
         reformed hidden states (b, n, D+1)
     """
 
-    return torch.cat(
-        (hidden_states, torch.ones_like(hidden_states)[:, :, 1].unsqueeze(2)), dim=-1
-    )
+    return torch.cat((hidden_states, torch.ones_like(hidden_states)[:, :, 1].unsqueeze(2)), dim=-1)
 
 
 def skew(query, key, wq, wk, n_head, head_dim, n_kv_groups=None):
@@ -83,21 +79,23 @@ def skew(query, key, wq, wk, n_head, head_dim, n_kv_groups=None):
     """
 
     if n_kv_groups is not None:
-        key = repeat_kv(key, n_kv_groups)
-        wk = wk.repeat(n_kv_groups, 1)
+        k = repeat_kv(key, n_kv_groups)
+        # wk = wk.repeat(n_kv_groups, 1)
 
+    A = torch.zeros(n_head, head_dim, head_dim).to("cuda").to(torch.float16)
     for h_idx in range(n_head):
         start = h_idx * head_dim
         end = (h_idx + 1) * head_dim
-        _, sq, vq = torch.svd(query[0, :, h_idx].to(torch.float))
-        _, sk, _ = torch.svd(key[0, :, h_idx].to(torch.float))
+        _, sq, vq = torch.svd(query[0, h_idx].to(torch.float))
+        _, sk, _ = torch.svd(k[0, h_idx].to(torch.float))
         sq = sq.to(torch.float16)
         vq = vq.to(torch.float16)
         sk = sk.to(torch.float16)
-        sq = sq * sk
-        A = torch.zeros(head_dim, head_dim).to(query.device).to(torch.float16)
-        _, ind = sq.sort()
-        A = A.scatter(-1, ind.unsqueeze(0).repeat(head_dim, 1), vq)
-        wq[start:end, :] = A.t() @ wq[start:end]
-        wk[start:end, :] = A.t() @ wk[start:end]
-    return wq, wk
+        s = sq * sk
+        a = torch.zeros(head_dim, head_dim, dtype=torch.float16, device="cuda")
+        _, ind = s.sort()
+        r, c = a.shape
+        A[h_idx] = a.scatter(-1, ind.unsqueeze(0).repeat(r, 1), vq)
+        # wq[start:end, :] = A[h_idx].t() @ wq[start:end]
+        # wk[start:end, :] = A.t() @ wk[start:end]
+    return A

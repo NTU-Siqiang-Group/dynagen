@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
-def partial_weight_index_generation(query, n_head, head_dim, partial_weight_ratio):
+def partial_weight_index_generation(query, n_head, head_dim, skewing_matrix, partial_weight_ratio):
     """Generates the indices of partial weight query and partial key cache.
 
     On the prefill stage, generates the indices of partial weight query and
@@ -22,16 +22,14 @@ def partial_weight_index_generation(query, n_head, head_dim, partial_weight_rati
             where d' is d * (partial_weight_ratio).
     """
 
-    partial_weight_index = torch.zeros(n_head, int(head_dim * partial_weight_ratio)).to(
-        query.device
-    )
+    partial_weight_index = torch.zeros(n_head, int(head_dim * partial_weight_ratio)).to(query.device)
     b = query.shape[0]
 
     for h_idx in range(n_head):
         start = h_idx * head_dim
         end = (h_idx + 1) * head_dim
         _, ind = torch.topk(
-            torch.sum(torch.abs(query[0, :, start:end]), dim=-2),
+            torch.sum(torch.abs(query[0, h_idx] @ skewing_matrix[h_idx]), dim=-2),
             int(head_dim * partial_weight_ratio),
         )
         partial_weight_index[h_idx] = ind
@@ -39,7 +37,7 @@ def partial_weight_index_generation(query, n_head, head_dim, partial_weight_rati
     return partial_weight_index.unsqueeze(0).repeat(b, 1, 1).to(torch.int64)
 
 
-def set_partial_cache(k_cache, partial_index, n_head, head_dim):
+def set_partial_cache(k_cache, skewing_matrix, partial_index, n_head, head_dim):
     """Sets the partial key cache.
 
     On the prefill and decoding stages, generates the partial key cache
@@ -57,15 +55,16 @@ def set_partial_cache(k_cache, partial_index, n_head, head_dim):
     """
 
     n, bh, _ = k_cache.shape
+    k = k_cache @ skewing_matrix
     partial_cache = torch.gather(
-        k_cache.view(n, -1, n_head, head_dim),
+        k.view(n, -1, n_head, head_dim),
         3,
         partial_index.unsqueeze(0).repeat(n, 1, 1, 1),
     )
     return partial_cache.view(n, bh, -1)
 
 
-def set_partial_weight(w_q, partial_index, n_head, head_dim):
+def set_partial_weight(w_q, skewing_matrix, partial_index, n_head, head_dim):
     """Sets the partial query weight.
 
     On the prefill stage, generates the partial query weight following the
@@ -81,9 +80,14 @@ def set_partial_weight(w_q, partial_index, n_head, head_dim):
         partial_weight: Partial query weight (D', D)
     """
 
+    s_w_q = torch.zeros_like(w_q)
+    for h_idx in range(n_head):
+        start = h_idx * head_dim
+        end = (h_idx + 1) * head_dim
+        s_w_q[start:end, :] = skewing_matrix[h_idx].t() @ w_q[start:end]
+
     partial_weight = F.embedding(
-        partial_index[0]
-        + torch.arange(n_head)[:, None].to(partial_index.device) * head_dim,
-        w_q.view(-1, w_q.shape[-1]),
+        partial_index[0] + torch.arange(n_head)[:, None].to(partial_index.device) * head_dim,
+        s_w_q.view(-1, w_q.shape[-1]),
     )
     return partial_weight.view(-1, w_q.shape[-1])

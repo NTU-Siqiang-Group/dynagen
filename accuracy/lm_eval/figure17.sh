@@ -20,7 +20,7 @@ capacity=1.0
 budget=0.2
 
 echo "Threshold (alpha) sweep"
-for alpha in 1 2 3 4 5 6 7 8 9; do
+for alpha in 4; do
 # for alpha in 6 8; do
   echo alpha "${alpha}"
   bash ours.sh winogrande ${LLAMA_PATH} ${LLAMA_PATH} llama ${shots} ${partial} ${alpha} ${capacity} ${budget}

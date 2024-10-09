@@ -1142,19 +1142,20 @@ class LlamaTorchDevice(TorchDevice):
         k = F.linear(hidden, w_k.data)
         v = F.linear(hidden, w_v.data)
 
-        # Partial weight index generation
-        partial_weight_index = None
-        if (not warmup) and (partial_weight_ratio is not None):
-            partial_weight_index = partial_weight_index_generation(q, n_head, head_dim, partial_weight_ratio)
         # shape: (b, s, n_head, head_dim)
         q = q.view(b, s, n_head, head_dim)
         k = k.view(b, s, n_kv_head, head_dim)
         v = v.view(b, s, n_kv_head, head_dim)
 
         # Generate skewing matrix
-        # if warmup:
-        #     w_q.data, w_k.data = skew(q, k, w_q.data, w_k.data, n_head, head_dim, n_kv_groups)
-        #     w_k.shape = w_k.data.shape
+        if warmup:
+            self.skewing_matrix = skew(q, k, w_q.data, w_k.data, n_head, head_dim, n_kv_groups)
+        # Partial weight index generation
+        partial_weight_index = None
+        if (not warmup) and (partial_weight_ratio is not None):
+            partial_weight_index = partial_weight_index_generation(
+                q, n_head, head_dim, self.skewing_matrix, partial_weight_ratio
+            )
 
         kv_seq_len = k.shape[-3]
         cos, sin = rotary_embedding(v, w_re.data, seq_len=kv_seq_len)
@@ -1207,7 +1208,7 @@ class LlamaTorchDevice(TorchDevice):
             k = TorchTensor.create_from_torch(k, self)
             v = TorchTensor.create_from_torch(v, self)
 
-        return TorchTensor.create_from_torch(value, self), k, v, w_q, w_k, partial_weight_index
+        return TorchTensor.create_from_torch(value, self), k, v, self.skewing_matrix, partial_weight_index
 
     def llama_mha_gen(
         self,
@@ -1254,7 +1255,9 @@ class LlamaTorchDevice(TorchDevice):
         prefetch_idx = None
         if p_w_q is not None:
             with torch.cuda.stream(speculation_stream):
-                prefetch_idx = speculate_attention(hidden, p_w_q, partial_k_cache, n_head, alpha, max_num_kv)
+                prefetch_idx = speculate_attention(
+                    hidden, p_w_q, partial_k_cache, attention_mask.data[:, :-1], n_head, alpha, max_num_kv
+                )
 
         # shape: (b, 1, h)
         q = F.linear(hidden, w_q.data) * scaling
@@ -1301,7 +1304,11 @@ class LlamaTorchDevice(TorchDevice):
 
                 if k.is_cuda:
                     # TODO: Check infinigen correctness
-                    value = self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
+                    print(attention_mask.shape[-1], src_s)
+                    if attention_mask.shape[-1] == src_s:
+                        value = self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
+                    else:
+                        value = self._attention_value(q, k, v, None, b, src_s, tgt_s, n_head, head_dim)
                 else:
                     q = q.float().cpu()
                     k, v = k.float(), v.float()

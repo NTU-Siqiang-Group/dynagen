@@ -25,7 +25,7 @@ def select_kv(prefetch_idx, k_cache, v_cache):
     return selected_k, selected_v
 
 
-def speculate_attention(hidden, p_w_q, p_k_c, n_head, alpha, max_num_kv):
+def speculate_attention(hidden, p_w_q, p_k_c, mask, n_head, alpha, max_num_kv):
     """Speculates the indices of the critical KV caches of next attention layer.
 
     On the decoding stage, by using the hidden states (layer i), partial query
@@ -45,19 +45,22 @@ def speculate_attention(hidden, p_w_q, p_k_c, n_head, alpha, max_num_kv):
         prefetch_idx: Indices of critical KV cache tokens for each head and batch (n', 1, bh)
     """
     b = hidden.shape[0]
+    s = mask.shape[-1]
     p_q = F.linear(hidden, p_w_q, bias=None)
     p_q = p_q.view(b, 1, n_head, -1)
     p_q = p_q.permute(0, 2, 1, 3).reshape(b * n_head, 1, -1)
-
+    # print("p_k_c:", p_k_c)
+    m = mask.view(b, 1, 1, s)
     p_attn = torch.bmm(p_q, p_k_c.permute(1, 2, 0))
+    orig_shape = p_attn.shape
+    p_attn = p_attn.view(b, n_head, 1, s)
+    p_attn = torch.where(m, p_attn, -1e4)
+    p_attn = p_attn.view(orig_shape)
+    # print(p_attn.shape, mask.shape)
     max_ = torch.max(p_attn, dim=-1)[0]
     thr_ = (max_ - alpha).unsqueeze(-1).repeat(1, 1, p_attn.shape[-1])
-    count = torch.where(
-        p_attn > thr_, torch.ones_like(p_attn), torch.zeros_like(p_attn)
-    )
+    count = torch.where(p_attn > thr_, torch.ones_like(p_attn), torch.zeros_like(p_attn))
     mean = torch.mean(torch.sum(count, dim=-1)).item()
-    prefetch_idx = torch.topk(
-        p_attn.permute(2, 1, 0), min(int(mean), max_num_kv), dim=0
-    )[1]
+    prefetch_idx = torch.topk(p_attn.permute(2, 1, 0), max(int(0.2 * s), min(int(mean), max_num_kv)), dim=0)[1]
 
     return prefetch_idx
