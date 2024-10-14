@@ -55,9 +55,9 @@ def set_partial_cache(k_cache, skewing_matrix, partial_index, n_head, head_dim):
     """
 
     n, bh, _ = k_cache.shape
-    k = k_cache @ skewing_matrix
+    # k = k_cache @ skewing_matrix
     partial_cache = torch.gather(
-        k.view(n, -1, n_head, head_dim),
+        k_cache.view(n, -1, n_head, head_dim),
         3,
         partial_index.unsqueeze(0).repeat(n, 1, 1, 1),
     )

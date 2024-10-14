@@ -155,7 +155,7 @@ class InputEmbed:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len), np.int64
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, output_ids):
         # Compute input embedding
         donate = [False] * 4
         h, donate[0] = hidden.val, True
@@ -224,7 +224,7 @@ class OutputEmbed:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, output_ids):
         donate = [False] * 4
         h, donate[0] = hidden.val, True
 
@@ -534,6 +534,7 @@ class SelfAttention:
         prev_partial_cache_read_buf,
         prev_partial_weight_read_buf,
         weight_home,
+        output_ids,
     ):
         n_head = self.config.n_head
 
@@ -742,7 +743,7 @@ class MLP:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, output_ids):
         donate = [False] * 7
         h, donate[0] = hidden.val, True
 
@@ -1100,6 +1101,7 @@ class OptLM:
                         self.partial_cache_read_buf[prev_attn][k],
                         self.partial_weight_read_buf[prev_attn],
                         self.weight_home[j],
+                        self.output_ids,
                     )
                 else:
                     self.layers[j].forward(
@@ -1117,6 +1119,7 @@ class OptLM:
                         None,
                         None,
                         self.weight_home[j],
+                        self.output_ids,
                     )
         else:
             self.layers[j].forward(
@@ -1127,6 +1130,7 @@ class OptLM:
                 self.cache_write_buf[j][k],
                 i,
                 k,
+                self.output_ids,
             )
 
     def sync(self):
@@ -1264,16 +1268,14 @@ class OptLM:
     def generation_loop_normal(self, evaluate):
         self.set_weight()
 
-        for i in range(self.execute_gen_len):
+        for i in tqdm(range(self.execute_gen_len)):
             timers("generate").start()
             for k in range(self.num_gpu_batches):
                 self.update_attention_mask(i, k)
             for j in range(self.num_layers):
                 for k in range(self.num_gpu_batches):
-                    self.load_weight(i, j, k, overlap=False)
-
-                for k in range(self.num_gpu_batches):
-                    self.load_cache(i, j, k, overlap=False)
+                    self.load_weight(i, j, k)
+                    self.load_cache(i, j, k)
                     self.load_hidden(i, j, k)
                     if (j in self.attn_layer[1:-1]) and (i > 0):
                         self.sync()

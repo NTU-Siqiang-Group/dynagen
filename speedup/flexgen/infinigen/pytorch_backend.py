@@ -1078,7 +1078,7 @@ class LlamaTorchDevice(TorchDevice):
 
         return TorchTensor.create_from_torch(token_embed, self)
 
-    def llama_output_embed(self, inputs, w_ln, w_token, eps, donate, do_sample, temperature, evaluate):
+    def llama_output_embed(self, inputs, w_ln, w_token, eps, donate, do_sample, temperature, evaluate, output_ids):
         # decompress weights
         if w_token.device.device_type == DeviceType.COMPRESSED:
             w_token = w_token.device.decompress(w_token)
@@ -1086,13 +1086,17 @@ class LlamaTorchDevice(TorchDevice):
         hidden = rms_norm(inputs.data, weight=w_ln.data, eps=eps)
         if donate[0]:
             inputs.delete()
-
         # output embedding
         logits = F.linear(hidden, w_token.data)
         last_token_logits = logits[:, -1, :]
 
         if evaluate:
             return TorchTensor.create_from_torch(logits, self)
+
+        # for i in range(last_token_logits.shape[0]):
+        #     recent_tokens = output_ids[i][-3:]
+        #     for previous_token in set(recent_tokens):
+        #         last_token_logits[i, previous_token] /= 10
 
         if do_sample and not temperature < 1e-5:
             probs = torch.softmax(last_token_logits / temperature, dim=-1)
@@ -1304,7 +1308,8 @@ class LlamaTorchDevice(TorchDevice):
 
                 if k.is_cuda:
                     # TODO: Check infinigen correctness
-                    print(attention_mask.shape[-1], src_s)
+                    # if attention_mask.shape[-1] % 100 == 0:
+                    #     print(attention_mask.shape[-1], src_s)
                     if attention_mask.shape[-1] == src_s:
                         value = self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
                     else:
@@ -1540,7 +1545,7 @@ class TorchCPUWeightTensorManager:
         self, weight_home: ValueHolder, weight_specs: List[Tuple], weight_read_buf: ValueHolder, policy
     ):
         self._init_cpu_weight_percent_cumsum(policy.compress_weight)
-
+        # print(policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent)
         dev_percents = (policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent)
         dummy = self.DUMMY_WEIGHT in weight_specs[0][2]
 

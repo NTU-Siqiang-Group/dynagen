@@ -76,7 +76,7 @@ class LlamaInputEmbed(InputEmbed):
             dst = self.weight_load_dst
             weight_read_buf.store((w_token.smart_copy(dst),))
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, output_ids):
         # Compute input embedding
         donate = [False] * 3
         h, donate[0] = hidden.val, True
@@ -123,7 +123,7 @@ class LlamaOutputEmbed(OutputEmbed):
             dst2 = self.compute
             weight_read_buf.store((w_ln.smart_copy(dst2), w_token.smart_copy(dst1)))
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, output_ids):
         donate = [False] * 3
         h, donate[0] = hidden.val, True
 
@@ -132,7 +132,6 @@ class LlamaOutputEmbed(OutputEmbed):
             (w_ln, donate[1]), (w_token, donate[2]) = weight_read_buf.val
         else:
             (w_ln, _), (w_token, _) = weight_read_buf.val
-
         h = self.compute.llama_output_embed(
             h,
             w_ln,
@@ -140,8 +139,9 @@ class LlamaOutputEmbed(OutputEmbed):
             self.config.rms_norm_eps,
             donate,
             do_sample=True,
-            temperature=0.7,
+            temperature=0.5,
             evaluate=self.task.evaluate,
+            output_ids=output_ids,
         )
         hidden.val = h
 
@@ -219,6 +219,7 @@ class LlamaSelfAttention(SelfAttention):
         prev_partial_cache_read_buf,
         prev_partial_weight_read_buf,
         weight_home,
+        output_ids,
     ):
         n_head = self.config.n_head
         n_kv_head = self.config.num_key_value_heads
@@ -383,7 +384,7 @@ class LlamaMLP(MLP):
                 (w_ln.smart_copy(dst2), w_g.smart_copy(dst1), w_u.smart_copy(dst1), w_d.smart_copy(dst1))
             )
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, output_ids):
         donate = [False] * 5
         h, donate[0] = hidden.val, True
 
@@ -500,7 +501,7 @@ class LlamaLM(OptLM):
 
 
 def get_test_inputs(prompt_len, num_prompts, tokenizer):
-    prompts = ["Write a 1000-word article on the history of the Roman Empire."]
+    prompts = ["Write a 5000-word article on the history of the Roman Empire."]
     input_ids = tokenizer(prompts, padding="max_length", max_length=prompt_len).input_ids
     return (input_ids[0],) * num_prompts
 
@@ -513,8 +514,9 @@ def run_flexgen(args):
     prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
 
     # Task and policy
-    warmup_inputs = get_test_inputs(2048, num_prompts, tokenizer)
-    inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
+    # warmup_inputs = get_test_inputs(2048, num_prompts, tokenizer)
+    warmup_inputs = get_inputs(prompt_len, num_prompts, tokenizer, args.warmup_input_path)
+    inputs = get_inputs(prompt_len, num_prompts, tokenizer, args.test_input_path)
 
     gpu = LlamaTorchDevice("cuda:0")
     cpu = LlamaTorchDevice("cpu")
@@ -593,6 +595,8 @@ def run_flexgen(args):
             show_str += "-" * 70 + "\n"
         if args.verbose >= 2:
             print(show_str)
+        with open("outputs.txt", "w") as f:
+            f.write(show_str)
 
     gpu.print_stats()
     cpu.print_stats()

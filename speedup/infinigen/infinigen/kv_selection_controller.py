@@ -49,18 +49,31 @@ def speculate_attention(hidden, p_w_q, p_k_c, mask, n_head, alpha, max_num_kv):
     p_q = F.linear(hidden, p_w_q, bias=None)
     p_q = p_q.view(b, 1, n_head, -1)
     p_q = p_q.permute(0, 2, 1, 3).reshape(b * n_head, 1, -1)
-    # print("p_k_c:", p_k_c)
+    p_attn = torch.bmm(p_q, p_k_c.permute(1, 2, 0))
+
     m = mask.view(b, 1, 1, s)
     p_attn = torch.bmm(p_q, p_k_c.permute(1, 2, 0))
     orig_shape = p_attn.shape
     p_attn = p_attn.view(b, n_head, 1, s)
     p_attn = torch.where(m, p_attn, -1e4)
     p_attn = p_attn.view(orig_shape)
-    # print(p_attn.shape, mask.shape)
+
+    recent_entries = min(int(0.5 * s), 100)
+    p_attn_recent = p_attn[:, :, -recent_entries:]
+    p_attn = p_attn[:, :, :-recent_entries]
+    mask = mask[:, :-recent_entries]
+
     max_ = torch.max(p_attn, dim=-1)[0]
     thr_ = (max_ - alpha).unsqueeze(-1).repeat(1, 1, p_attn.shape[-1])
     count = torch.where(p_attn > thr_, torch.ones_like(p_attn), torch.zeros_like(p_attn))
     mean = torch.mean(torch.sum(count, dim=-1)).item()
-    prefetch_idx = torch.topk(p_attn.permute(2, 1, 0), max(int(0.2 * s), min(int(mean), max_num_kv)), dim=0)[1]
+    p_attn = torch.where(mask, p_attn, -1e4)
+    prefetch_idx = torch.topk(p_attn.permute(2, 1, 0), min(int(mean), max_num_kv), dim=0)[1]
+
+    prefetch_idx_recent = (
+        torch.arange(s - recent_entries, s).unsqueeze(1).unsqueeze(2).repeat(1, 1, b * n_head).to(prefetch_idx.device)
+    )
+
+    prefetch_idx = torch.cat([prefetch_idx, prefetch_idx_recent], dim=0)
 
     return prefetch_idx
