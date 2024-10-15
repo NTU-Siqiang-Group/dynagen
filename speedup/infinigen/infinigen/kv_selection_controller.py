@@ -58,22 +58,22 @@ def speculate_attention(hidden, p_w_q, p_k_c, mask, n_head, alpha, max_num_kv):
     p_attn = torch.where(m, p_attn, -1e4)
     p_attn = p_attn.view(orig_shape)
 
-    recent_entries = min(int(0.5 * s), 100)
+    recent_entries = min(int(0.5 * s), 500)
     p_attn_recent = p_attn[:, :, -recent_entries:]
-    p_attn = p_attn[:, :, :-recent_entries]
-    mask = mask[:, :-recent_entries]
+    # p_attn = p_attn[:, :, :-recent_entries]
+    # mask = mask[:, :-recent_entries]
 
     max_ = torch.max(p_attn, dim=-1)[0]
     thr_ = (max_ - alpha).unsqueeze(-1).repeat(1, 1, p_attn.shape[-1])
     count = torch.where(p_attn > thr_, torch.ones_like(p_attn), torch.zeros_like(p_attn))
     mean = torch.mean(torch.sum(count, dim=-1)).item()
     p_attn = torch.where(mask, p_attn, -1e4)
-    prefetch_idx = torch.topk(p_attn.permute(2, 1, 0), min(int(mean), max_num_kv), dim=0)[1]
+    prefetch_idx = torch.topk(p_attn.permute(2, 1, 0), max(0, min(int(mean), max_num_kv)), dim=0)[1]
 
-    prefetch_idx_recent = (
-        torch.arange(s - recent_entries, s).unsqueeze(1).unsqueeze(2).repeat(1, 1, b * n_head).to(prefetch_idx.device)
-    )
+    # prefetch_idx_recent = (
+    #     torch.arange(s - recent_entries, s).unsqueeze(1).unsqueeze(2).repeat(1, 1, b * n_head).to(prefetch_idx.device)
+    # )
 
-    prefetch_idx = torch.cat([prefetch_idx, prefetch_idx_recent], dim=0)
+    # prefetch_idx = torch.cat([prefetch_idx, prefetch_idx_recent], dim=0)
 
     return prefetch_idx

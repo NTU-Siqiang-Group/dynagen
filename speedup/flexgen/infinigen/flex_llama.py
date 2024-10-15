@@ -139,7 +139,7 @@ class LlamaOutputEmbed(OutputEmbed):
             self.config.rms_norm_eps,
             donate,
             do_sample=True,
-            temperature=0.5,
+            temperature=0.8,
             evaluate=self.task.evaluate,
             output_ids=output_ids,
         )

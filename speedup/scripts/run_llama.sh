@@ -14,11 +14,11 @@ do
   for MODEL in "THUDM/LongWriter-llama3.1-8b"
   # for MODEL in "meta-llama/Meta-Llama-3.1-8B"
   # for MODEL in "NurtureAI/Meta-Llama-3-8B-Instruct-32k"
-  # for MODEL in "MaziyarPanahi/Llama-3-8B-Instruct-64k" 
+  # for MODEL in "princeton-nlp/Llama-3-8B-ProLong-64k-Base" 
   do
     CMD="--model $MODEL"
-    CMD=$CMD" --percent 0 100 100 0 100 0"
-    CMD=$CMD" --overlap false --gpu-batch-size 1 --num-gpu-batches 1 --prompt-len 1000 --gen-len 6000"
+    CMD=$CMD" --percent 100 0 100 0 100 0"
+    CMD=$CMD" --overlap false --gpu-batch-size 1 --num-gpu-batches 1 --prompt-len 3000 --gen-len 2200"
     if [ "$SCHEME" = "int4" ]
     then
       CMD=$CMD" --compress-cache"
@@ -27,7 +27,7 @@ do
       CMD=$CMD" --max-num-kv 409 --hh-ratio 0.1 --hh-all"
     elif [ "$SCHEME" = "infinigen" ]
     then
-      CMD=$CMD" --warmup-input-path ../test.txt --test-input-path ../test.txt --alpha 30 --partial-weight-ratio 0.2 --max-num-kv 8192"
+      CMD=$CMD" --warmup-input-path ../test.txt --test-input-path ../test.txt --alpha 50 --partial-weight-ratio 0.1 --max-num-kv 8192"
     fi
     python -m flexgen.flex_llama $CMD
   done

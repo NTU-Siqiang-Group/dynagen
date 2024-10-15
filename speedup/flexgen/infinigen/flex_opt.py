@@ -1558,6 +1558,7 @@ def get_inputs(prompt_len, num_prompts, tokenizer, path):
     with open(path, "r") as file:
         prompts.append(file.read())
     input_ids = tokenizer(prompts, padding="max_length", max_length=prompt_len).input_ids
+    print(f"input_ids: {len(input_ids[0])}")    
     input_ids[0] = input_ids[0][:prompt_len]
     return (input_ids[0],) * num_prompts
 

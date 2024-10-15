@@ -6,3 +6,4 @@ __pycache__
 .vscode/
 accuracy/transformers/
 *.egg-info/
+test.py

@@ -1094,7 +1094,7 @@ class LlamaTorchDevice(TorchDevice):
             return TorchTensor.create_from_torch(logits, self)
 
         # for i in range(last_token_logits.shape[0]):
-        #     recent_tokens = output_ids[i][-3:]
+        #     recent_tokens = output_ids[i][-5:]
         #     for previous_token in set(recent_tokens):
         #         last_token_logits[i, previous_token] /= 10
 
@@ -1308,8 +1308,8 @@ class LlamaTorchDevice(TorchDevice):
 
                 if k.is_cuda:
                     # TODO: Check infinigen correctness
-                    # if attention_mask.shape[-1] % 100 == 0:
-                    #     print(attention_mask.shape[-1], src_s)
+                    if attention_mask.shape[-1] % 100 == 0:
+                        print(attention_mask.shape[-1], src_s)
                     if attention_mask.shape[-1] == src_s:
                         value = self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
                     else:
