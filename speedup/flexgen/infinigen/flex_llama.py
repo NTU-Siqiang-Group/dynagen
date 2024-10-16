@@ -84,7 +84,7 @@ class LlamaInputEmbed(InputEmbed):
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            ((w_token, donate[2]),) = weight_read_buf.val
+            ((w_token, donate[2]),) = weight_read_buf.pop()
         else:
             ((w_token, _),) = weight_read_buf.val
 
@@ -129,7 +129,7 @@ class LlamaOutputEmbed(OutputEmbed):
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            (w_ln, donate[1]), (w_token, donate[2]) = weight_read_buf.val
+            (w_ln, donate[1]), (w_token, donate[2]) = weight_read_buf.pop()
         else:
             (w_ln, _), (w_token, _) = weight_read_buf.val
         h = self.compute.llama_output_embed(
@@ -239,7 +239,7 @@ class LlamaSelfAttention(SelfAttention):
                 (w_o, donate[7]),
             ) = weight_read_buf.val
         else:
-            ((w_ln, _), (w_q, _), (w_k, _), (w_v, _), (w_re, _), (w_o, _)) = weight_read_buf.val
+            ((w_ln, _), (w_q, _), (w_k, _), (w_v, _), (w_re, _), (w_o, _)) = weight_read_buf.pop()
         if self.enable_prefetching and (i > 0):
             p_w_q = partial_weight_read_buf.val
 
@@ -390,7 +390,7 @@ class LlamaMLP(MLP):
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            ((w_ln, donate[1]), (w_g, donate[2]), (w_u, donate[3]), (w_d, donate[4])) = weight_read_buf.val
+            ((w_ln, donate[1]), (w_g, donate[2]), (w_u, donate[3]), (w_d, donate[4])) = weight_read_buf.pop()
         else:
             ((w_ln, _), (w_g, _), (w_u, _), (w_d, _)) = weight_read_buf.val
 
