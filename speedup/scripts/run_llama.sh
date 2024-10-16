@@ -1,6 +1,6 @@
 FLEXGEN_PATH=$PWD/../flexgen
-# for SCHEME in "original" "int4" "h2o" "infinigen"
-for SCHEME in "infinigen"
+# for SCHEME in "original" "int4" "h2o" "dynagen"
+for SCHEME in "dynagen"
 do
   rm $FLEXGEN_PATH/flexgen/flex_llama.py
   rm $FLEXGEN_PATH/flexgen/flex_opt.py
@@ -17,8 +17,8 @@ do
   # for MODEL in "princeton-nlp/Llama-3-8B-ProLong-64k-Base" 
   do
     CMD="--model $MODEL"
-    CMD=$CMD" --percent 50 50 100 0 100 0"
-    CMD=$CMD" --overlap false --gpu-batch-size 1 --num-gpu-batches 1 --prompt-len 3000 --gen-len 4000"
+    CMD=$CMD" --percent 100 0 100 0 100 0"
+    CMD=$CMD" --overlap false --gpu-batch-size 1 --num-gpu-batches 1 --prompt-len 32 --gen-len 2048"
     if [ "$SCHEME" = "int4" ]
     then
       CMD=$CMD" --compress-cache"
@@ -27,7 +27,7 @@ do
       CMD=$CMD" --max-num-kv 409 --hh-ratio 0.1 --hh-all"
     elif [ "$SCHEME" = "infinigen" ]
     then
-      CMD=$CMD" --warmup-input-path ../test.txt --test-input-path ../test.txt --alpha 50 --partial-weight-ratio 0.1 --max-num-kv 8192"
+      CMD=$CMD # " --warmup-input-path ../test.txt --test-input-path ../test.txt --alpha 10 --partial-weight-ratio 0.1 --max-num-kv 8192"
     fi
     python -m flexgen.flex_llama $CMD
   done

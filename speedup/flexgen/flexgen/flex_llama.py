@@ -1,1 +1,1 @@
-../infinigen/flex_llama.py
+../dynagen/flex_llama.py

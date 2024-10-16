@@ -6,16 +6,19 @@ python3 -m flexgen.flex_llama --model meta-llama/Llama-2-7b-chat-hf --gpu-batch-
 import os
 import torch
 import argparse
-from typing import Union
+import numpy as np
+from tqdm import tqdm
+from typing import Union, List, Optional
 from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
 from flexgen.pytorch_backend import (
     LlamaTorchDevice,
-    TorchCPUWeightTensorManager,
     TorchDisk,
     TorchMixedDevice,
     fix_recursive_import,
+    TorchCPUWeightTensorManager,
+    DeviceType,
 )
 from flexgen.flex_opt import (
     Policy,
@@ -31,17 +34,16 @@ from flexgen.flex_opt import (
 from flexgen.timer import timers
 from flexgen.utils import (
     ExecutionEnv,
+    Task,
     GB,
     ValueHolder,
     array_1d,
     array_2d,
+    array_3d,
     str2bool,
     project_decode_latency,
     write_benchmark_log,
 )
-
-from infinigen.kv_selection_controller import select_kv
-from infinigen.partial_weight_generation_controller import set_partial_cache, set_partial_weight
 
 fix_recursive_import()
 
@@ -76,7 +78,7 @@ class LlamaInputEmbed(InputEmbed):
             dst = self.weight_load_dst
             weight_read_buf.store((w_token.smart_copy(dst),))
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, output_ids):
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         # Compute input embedding
         donate = [False] * 3
         h, donate[0] = hidden.val, True
@@ -123,7 +125,7 @@ class LlamaOutputEmbed(OutputEmbed):
             dst2 = self.compute
             weight_read_buf.store((w_ln.smart_copy(dst2), w_token.smart_copy(dst1)))
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, output_ids):
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 3
         h, donate[0] = hidden.val, True
 
@@ -139,18 +141,23 @@ class LlamaOutputEmbed(OutputEmbed):
             self.config.rms_norm_eps,
             donate,
             do_sample=True,
-            temperature=0.8,
+            temperature=0.5,
             evaluate=self.task.evaluate,
-            output_ids=output_ids,
         )
         hidden.val = h
 
 
 class LlamaSelfAttention(SelfAttention):
-    def __init__(
-        self, config, env, policy, layer_id, enable_prefetching, partial_weight_ratio=0.2, alpha=4, max_num_kv=400
-    ):
-        super().__init__(config, env, policy, layer_id, enable_prefetching, partial_weight_ratio, alpha, max_num_kv)
+    def __init__(self, config, env, policy, layer_id):
+        self.config = config
+        self.env = env
+        self.layer_id = layer_id
+        self.policy = policy
+        self.compute = self.env.gpu
+        self.weight_load_dst = self.compute.compressed_device if policy.compress_weight else self.compute
+        self.attention_compute = self.env.cpu if self.policy.cpu_cache_compute else self.env.gpu
+
+        self.task = None
 
     def get_weight_specs(self, path):
         h, n_head, n_kv_head, dtype = (
@@ -201,32 +208,29 @@ class LlamaSelfAttention(SelfAttention):
                 )
             )
 
-    # TODO: prefetch_cache?
+    def init_cache_one_gpu_batch(self, cache_home):
+        if self.policy.cache_gpu_percent == 100:
+            device = self.env.gpu
+        elif self.policy.cache_cpu_percent == 100:
+            device = self.env.cpu
+        elif self.policy.cache_disk_percent == 100:
+            device = self.env.disk
+        else:
+            device = self.env.mixed
 
-    def forward(
-        self,
-        hidden,
-        cache_read_buf,
-        weight_read_buf,
-        attention_mask,
-        cache_write_buf,
-        i,
-        k,
-        warmup,
-        partial_weight_read_buf,
-        partial_cache_read_buf,
-        speculation_stream,
-        prev_partial_cache_read_buf,
-        prev_partial_weight_read_buf,
-        weight_home,
-        output_ids,
-    ):
+        if self.policy.compress_cache:
+            assert device.device_type != DeviceType.MIXED
+            device = device.compressed_device
+
+        cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
+        cache_home.store(cache)
+
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         n_head = self.config.n_head
         n_kv_head = self.config.num_key_value_heads
 
         donate = [False] * 10
         h, donate[0] = hidden.val, True
-        head_dim = h.shape[-1] // n_head
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
@@ -237,17 +241,14 @@ class LlamaSelfAttention(SelfAttention):
                 (w_v, donate[5]),
                 (w_re, donate[6]),
                 (w_o, donate[7]),
-            ) = weight_read_buf.val
+            ) = weight_read_buf.pop()
         else:
-            ((w_ln, _), (w_q, _), (w_k, _), (w_v, _), (w_re, _), (w_o, _)) = weight_read_buf.pop()
-        if self.enable_prefetching and (i > 0):
-            p_w_q = partial_weight_read_buf.val
+            ((w_ln, _), (w_q, _), (w_k, _), (w_v, _), (w_re, _), (w_o, _)) = weight_read_buf.val
 
         if i == 0:  # prefill
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-            # print(f"mask: {mask.data}")
             position_ids = torch.cumsum(mask.data, dim=1).int() * mask.data + 1
-            h, new_k_cache, new_v_cache, self.skewing_matrix, self.partial_index = self.compute.llama_mha(
+            h, new_k_cache, new_v_cache = self.compute.llama_mha(
                 h,
                 position_ids,
                 mask,
@@ -263,87 +264,35 @@ class LlamaSelfAttention(SelfAttention):
                 self.config.rms_norm_eps,
                 self.policy.compress_cache,
                 self.policy.comp_cache_config,
-                warmup,
-                self.partial_weight_ratio,
             )
             cache_write_buf.store((new_k_cache, new_v_cache))
-            if (prev_partial_cache_read_buf is not None) and (not warmup):
-                prev_partial_cache_read_buf.store(
-                    set_partial_cache(new_k_cache.data, self.skewing_matrix, self.partial_index, n_head, head_dim)
-                )
-                prev_partial_weight_read_buf.store(
-                    set_partial_weight(w_q.data, self.skewing_matrix, self.partial_index, n_head, head_dim)
-                )
-            # if warmup:
-            #     weight_home.val[1] = w_q.smart_copy(weight_home.val[1].device)[0]
-            #     weight_home.val[2] = w_k.smart_copy(weight_home.val[2].device)[0]
         else:  # decoding
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
             (k_cache, donate[8]), (v_cache, donate[9]) = cache_read_buf.pop()
-            position_ids = torch.cumsum(mask.data, dim=1).int() * mask.data + 1
+            position_ids = torch.cumsum(mask.data, dim=1).long() * mask.data + 1
             position_ids = position_ids[:, -h.shape[1]].unsqueeze(1)
-            if self.enable_prefetching:
-                partial_k_cache = partial_cache_read_buf.val
-                h, new_k_cache, new_v_cache, self.prefetch_idx = self.compute.llama_mha_gen(
-                    h,
-                    position_ids,
-                    mask,
-                    w_ln,
-                    w_q,
-                    w_k,
-                    w_v,
-                    w_re,
-                    w_o,
-                    self.config.rms_norm_eps,
-                    n_head,
-                    n_kv_head,
-                    k_cache,
-                    v_cache,
-                    donate,
-                    self.policy.attn_sparsity,
-                    self.policy.compress_cache,
-                    self.policy.comp_cache_config,
-                    p_w_q,
-                    partial_k_cache,
-                    speculation_stream,
-                    self.alpha,
-                    self.max_num_kv,
-                )
-            else:
-                h, new_k_cache, new_v_cache, self.prefetch_idx = self.compute.llama_mha_gen(
-                    h,
-                    position_ids,
-                    mask,
-                    w_ln,
-                    w_q,
-                    w_k,
-                    w_v,
-                    w_re,
-                    w_o,
-                    self.config.rms_norm_eps,
-                    n_head,
-                    n_kv_head,
-                    k_cache,
-                    v_cache,
-                    donate,
-                    self.policy.attn_sparsity,
-                    self.policy.compress_cache,
-                    self.policy.comp_cache_config,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+            h, new_k_cache, new_v_cache = self.compute.llama_mha_gen(
+                h,
+                position_ids,
+                mask,
+                w_ln,
+                w_q,
+                w_k,
+                w_v,
+                w_re,
+                w_o,
+                self.config.rms_norm_eps,
+                n_head,
+                n_kv_head,
+                k_cache,
+                v_cache,
+                donate,
+                self.policy.attn_sparsity,
+                self.policy.compress_cache,
+                self.policy.comp_cache_config,
+            )
 
             cache_write_buf.store((new_k_cache, new_v_cache))
-            if (prev_partial_cache_read_buf is not None) and (self.layer_id > 1):
-                prev_partial_cache_read_buf.val = torch.cat(
-                    (
-                        prev_partial_cache_read_buf.val,
-                        set_partial_cache(new_k_cache.data, self.skewing_matrix, self.partial_index, n_head, head_dim),
-                    )
-                )
 
         hidden.val = h
 
@@ -384,7 +333,7 @@ class LlamaMLP(MLP):
                 (w_ln.smart_copy(dst2), w_g.smart_copy(dst1), w_u.smart_copy(dst1), w_d.smart_copy(dst1))
             )
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, output_ids):
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 5
         h, donate[0] = hidden.val, True
 
@@ -407,16 +356,7 @@ class LlamaTransformerLayer(TransformerLayer):
 
 
 class LlamaLM(OptLM):
-    def __init__(
-        self,
-        config: Union[str, LlamaConfig],
-        env: ExecutionEnv,
-        path: str,
-        policy: Policy,
-        partial_weight_ratio,
-        alpha,
-        max_num_kv,
-    ):
+    def __init__(self, config: Union[str, LlamaConfig], env: ExecutionEnv, path: str, policy: Policy):
         if isinstance(config, str):
             config = get_llama_config(config)
         self.config = config
@@ -426,27 +366,13 @@ class LlamaLM(OptLM):
         self.num_gpu_batches = policy.num_gpu_batches
 
         layers = []
-        self.attn_layer = []
         layers.append(LlamaInputEmbed(self.config, self.env, self.policy))
         for i in range(self.config.num_hidden_layers):
             if policy.sep_layer:
-                if (i == 0) or (i == (self.config.num_hidden_layers - 1)):
-                    layers.append(
-                        LlamaSelfAttention(
-                            self.config, self.env, self.policy, i, False, partial_weight_ratio, alpha, max_num_kv
-                        )
-                    )
-                else:
-                    layers.append(
-                        LlamaSelfAttention(
-                            self.config, self.env, self.policy, i, True, partial_weight_ratio, alpha, max_num_kv
-                        )
-                    )
-                self.attn_layer.append(len(layers) - 1)
+                layers.append(LlamaSelfAttention(self.config, self.env, self.policy, i))
                 layers.append(LlamaMLP(self.config, self.env, self.policy, i))
             else:
                 layers.append(LlamaTransformerLayer(self.config, self.env, self.policy, i))
-                self.attn_layer.append(len(layers) - 1)
         layers.append(LlamaOutputEmbed(self.config, self.env, self.policy))
         self.layers = layers
         self.num_layers = len(layers)
@@ -464,12 +390,6 @@ class LlamaLM(OptLM):
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
-        self.speculation_stream = torch.cuda.Stream()
-        # CUDA streams [j][k]
-        self.prefetch_cache_stream = torch.cuda.Stream()
-
-        # Event (To start self attention after prefetching)
-        self.prefetch_evt = torch.cuda.Event()
 
         # Intermediate tensors
         # The following buffers store values used
@@ -480,10 +400,8 @@ class LlamaLM(OptLM):
         self.cache_home = array_2d(num_layers, num_gpu_batches, ValueHolder)
         self.cache_read_buf = array_2d(num_layers, num_gpu_batches, ValueHolder)
         self.cache_write_buf = array_2d(num_layers, num_gpu_batches, ValueHolder)
-        self.partial_cache_read_buf = array_2d(num_layers, num_gpu_batches, ValueHolder)
         # weight[j]
         self.weight_read_buf = array_1d(num_layers, ValueHolder)
-        self.partial_weight_read_buf = array_1d(num_layers, ValueHolder)
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
 
@@ -499,9 +417,123 @@ class LlamaLM(OptLM):
 
         self.layers[j].init_weight(self.weight_manager, self.weight_home[j], expanded_path)
 
+    def generate(
+        self,
+        inputs: Union[np.array, List[List[int]]],
+        max_new_tokens: int = 32,
+        do_sample: bool = False,
+        temperature: float = 1.0,
+        stop: Optional[int] = None,
+        debug_mode: Optional[str] = None,
+        cut_gen_len: Optional[int] = None,
+        verbose: int = 0,
+        warmup: bool = False,
+        evaluate: bool = False,
+    ):
+        if evaluate:
+            assert max_new_tokens == 1 and self.num_gpu_batches == 1 and self.policy.gpu_batch_size == 1
+
+        task = Task(
+            inputs=inputs,
+            prompt_len=len(inputs[0]),
+            gen_len=max_new_tokens,
+            cut_gen_len=cut_gen_len,
+            do_sample=do_sample,
+            temperature=temperature,
+            stop=stop,
+            evaluate=evaluate,
+        )
+        num_layers = self.num_layers
+        num_gpu_batches = self.num_gpu_batches
+        gpu_batch_size = self.policy.gpu_batch_size
+        overlap = self.policy.overlap
+        prompt_len, gen_len = task.prompt_len, task.gen_len
+        self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
+        self.warmup = warmup
+
+        # Output token ids
+        self.output_ids = np.full((len(task.inputs), prompt_len + gen_len), self.config.pad_token_id, dtype=np.int32)
+        self.stopped = np.zeros((len(task.inputs), 1), dtype=bool)
+        self.output_ids[:, :prompt_len] = np.asarray(task.inputs)
+        assert gpu_batch_size * num_gpu_batches == len(task.inputs)
+
+        # Intermediate tensors
+        # The following buffers store values used
+        # for the i-th token, j-th layer, k-th gpu batch.
+        num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
+        for j in range(num_layers):
+            for k in range(num_gpu_batches):
+                self.cache_home[j][k].clear()
+                self.cache_read_buf[j][k].clear()
+                self.cache_write_buf[j][k].clear()
+        for j in range(num_layers):
+            self.weight_read_buf[j].clear()
+        for k in range(num_gpu_batches):
+            self.attention_mask[k].clear()
+        self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
+
+        # Init cache
+        self.set_task(task)
+        for j in range(num_layers):
+            for k in range(num_gpu_batches):
+                self.init_cache(j, k)
+        if self.policy.cpu_cache_compute:
+            self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
+
+        # Generate
+        self.generation_loop_normal(evaluate)
+        for j in range(num_layers):
+            for k in range(num_gpu_batches):
+                self.delete_cache(j, k)
+        if self.policy.cpu_cache_compute:
+            self.env.cpu.del_attention_compute_workspace()
+
+        if evaluate:
+            return self.hidden[0][-1][0].val.data.detach().cpu()
+
+        return self.output_ids
+
+    def compute_layer(self, i, j, k):
+        # Update the hidden in place
+        # Clear the weight_read_buf if it is the last gpu batch
+        # Clear the cache_read_buf
+        # Run layer computation
+        self.layers[j].forward(
+            self.hidden[i][j][k],
+            self.cache_read_buf[j][k],
+            self.weight_read_buf[j],
+            self.attention_mask[k],
+            self.cache_write_buf[j][k],
+            i,
+            k,
+        )
+    
+    def generation_loop_normal(self, evaluate):
+        self.set_weight()
+        for i in tqdm(range(self.execute_gen_len)):
+            timers("generate").start()
+            for k in range(self.num_gpu_batches):
+                self.update_attention_mask(i, k)
+            for j in range(self.num_layers):
+                for k in range(self.num_gpu_batches):
+                    self.load_weight(i, j, k)
+                    self.load_cache(i, j, k)
+                    self.load_hidden(i, j, k)
+                    self.compute_layer(i, j, k)
+                    if evaluate and j == self.num_layers - 1:
+                        self.sync()
+                        break
+                    self.sync()
+                    self.store_hidden(i, j, k)
+                    self.store_cache(i, j, k)
+                    # if j in self.attn_layer[1:-1] and (i > 0):
+                    #     self.prefetch_cache(i, j, k, overlap=True)
+                    #     self.prefetch_evt.record()
+            self.set_weight()
+            timers("generate").stop()
 
 def get_test_inputs(prompt_len, num_prompts, tokenizer):
-    prompts = ["Write a 5000-word article on the history of the Roman Empire."]
+    prompts = ["Write a 30000-word article on the history of the Roman Empire."]
     input_ids = tokenizer(prompts, padding="max_length", max_length=prompt_len).input_ids
     return (input_ids[0],) * num_prompts
 
@@ -514,9 +546,8 @@ def run_flexgen(args):
     prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
 
     # Task and policy
-    # warmup_inputs = get_test_inputs(2048, num_prompts, tokenizer)
-    warmup_inputs = get_inputs(prompt_len, num_prompts, tokenizer, args.warmup_input_path)
-    inputs = get_inputs(prompt_len, num_prompts, tokenizer, args.test_input_path)
+    warmup_inputs = get_test_inputs(32, num_prompts, tokenizer)
+    inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
 
     gpu = LlamaTorchDevice("cuda:0")
     cpu = LlamaTorchDevice("cpu")
@@ -554,11 +585,11 @@ def run_flexgen(args):
     )
 
     print("init weight...")
-    model = LlamaLM(llama_config, env, args.path, policy, args.partial_weight_ratio, args.alpha, args.max_num_kv)
+    model = LlamaLM(llama_config, env, args.path, policy)
 
     try:
         print("warmup - generate")
-        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose, warmup=True)
+        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
 
         print("benchmark - generate")
         timers("generate").reset()
@@ -569,6 +600,7 @@ def run_flexgen(args):
             cut_gen_len=cut_gen_len,
             verbose=args.verbose,
         )
+        print(output_ids)
         costs = timers("generate").costs
     finally:
         env.close_copy_threads()
@@ -595,8 +627,6 @@ def run_flexgen(args):
             show_str += "-" * 70 + "\n"
         if args.verbose >= 2:
             print(show_str)
-        with open("outputs.txt", "w") as f:
-            f.write(show_str)
 
     gpu.print_stats()
     cpu.print_stats()
@@ -667,13 +697,6 @@ def add_parser_arguments(parser):
     parser.add_argument("--no-log", action="store_true")
     parser.add_argument("--verbose", type=int, default=2)
     parser.add_argument("--overlap", type=str2bool, nargs="?", const=True, default=True)
-
-    parser.add_argument("--alpha", type=int, default=4)
-    parser.add_argument("--partial-weight-ratio", type=float, default=0.2)
-    parser.add_argument("--max-num-kv", type=int, default=400)
-
-    parser.add_argument("--warmup-input-path", type=str)
-    parser.add_argument("--test-input-path", type=str)
 
 
 if __name__ == "__main__":
