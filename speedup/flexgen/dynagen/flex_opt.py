@@ -930,6 +930,7 @@ class OptLM:
         # Load from weight_home to weight_read_buf
         if overlap:
             with torch.cuda.stream(self.load_weight_stream):
+                print(self.layers[j])
                 self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
         else:
             self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)

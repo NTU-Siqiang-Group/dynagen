@@ -6,6 +6,7 @@ python3 -m flexgen.flex_llama --model meta-llama/Llama-2-7b-chat-hf --gpu-batch-
 import os
 import torch
 import argparse
+import pynvml
 import numpy as np
 from tqdm import tqdm
 from typing import Union, List, Optional
@@ -481,7 +482,10 @@ class LlamaLM(OptLM):
             self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
 
         # Generate
-        self.generation_loop_normal(evaluate)
+        if num_gpu_batches == 1:
+            self.generation_loop_overlap_single_batch(evaluate)
+        else:
+            self.generation_loop_overlap_multi_batch()
         for j in range(num_layers):
             for k in range(num_gpu_batches):
                 self.delete_cache(j, k)
@@ -507,30 +511,82 @@ class LlamaLM(OptLM):
             i,
             k,
         )
-    
-    def generation_loop_normal(self, evaluate):
+
+    def load_weight(self, i, j, k, overlap=True):
+        # Handle corner cases
+        if j == self.num_layers:
+            j = 0
+            i += 1
+            if i == self.execute_gen_len:
+                return
+
+        # Load from weight_home to weight_read_buf
+        if overlap:
+            with torch.cuda.stream(self.load_weight_stream):
+                self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+        else:
+            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+
+    def set_weight(self):
+        expanded_path = os.path.abspath(os.path.expanduser(os.path.join(self.path, f"{self.config.name}-np")))
+        for j in range(self.num_layers):
+            self.layers[j].set_weight(self.weight_manager, self.weight_home[j], self.weight_read_buf[j], expanded_path)
+
+    def generation_loop_overlap_single_batch(self, evaluate):
+        # Prologue
         self.set_weight()
+        self.load_weight(0, 0, 0)
+        self.sync()
+
+        # Generate
         for i in tqdm(range(self.execute_gen_len)):
+            self.set_weight()
+            timers("generate").start()
+            self.update_attention_mask(i, 0)
+            for j in range(self.num_layers):
+                self.load_weight(i, j + 1, 0)
+                self.load_cache(i, j + 1, 0)
+                self.load_hidden(i, j, 0)
+                self.compute_layer(i, j, 0)
+                if evaluate and j == self.num_layers - 1:
+                    self.sync()
+                    break
+                self.store_cache(i, j - 1, 0)
+                self.store_hidden(i, j, 0)
+                self.sync()
+            timers("generate").stop()
+
+            if self.task.stop and np.all(self.stopped):
+                break
+
+    def generation_loop_overlap_multi_batch(self):
+        # Prologue
+        self.set_weight()
+        for k in range(self.num_gpu_batches):
+            self.load_weight(0, 0, k)
+        self.load_hidden(0, 0, 0)
+        self.sync()
+
+        # Generate
+        for i in tqdm(range(self.execute_gen_len)):
+            self.set_weight()
             timers("generate").start()
             for k in range(self.num_gpu_batches):
                 self.update_attention_mask(i, k)
             for j in range(self.num_layers):
                 for k in range(self.num_gpu_batches):
-                    self.load_weight(i, j, k)
-                    self.load_cache(i, j, k)
-                    self.load_hidden(i, j, k)
+                    self.load_weight(i, j + 1, k)
+                    self.load_cache(i, j, k + 1)
+                    self.store_hidden(i, j, k - 1)
+                    self.load_hidden(i, j, k + 1)
                     self.compute_layer(i, j, k)
-                    if evaluate and j == self.num_layers - 1:
-                        self.sync()
-                        break
+                    self.store_cache(i, j, k - 1)
                     self.sync()
-                    self.store_hidden(i, j, k)
-                    self.store_cache(i, j, k)
-                    # if j in self.attn_layer[1:-1] and (i > 0):
-                    #     self.prefetch_cache(i, j, k, overlap=True)
-                    #     self.prefetch_evt.record()
-            self.set_weight()
             timers("generate").stop()
+
+        # Epilogue
+        self.store_hidden(self.execute_gen_len - 1, self.num_layers - 1, self.num_gpu_batches - 1)
+
 
 def get_test_inputs(prompt_len, num_prompts, tokenizer):
     prompts = ["Write a 30000-word article on the history of the Roman Empire."]

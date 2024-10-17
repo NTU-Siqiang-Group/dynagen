@@ -1109,12 +1109,11 @@ class OptLM:
 
     def generation_loop_overlap_single_batch(self, evaluate):
         # Prologue
-        for k in range(self.num_gpu_batches):
-            self.load_weight(0, 0, k)
+        self.load_weight(0, 0, 0)
         self.sync()
 
         # Generate
-        for i in range(self.execute_gen_len):
+        for i in tqdm(range(self.execute_gen_len)):
             timers("generate").start()
             self.update_attention_mask(i, 0)
             for j in range(self.num_layers):
@@ -1141,7 +1140,7 @@ class OptLM:
         self.sync()
 
         # Generate
-        for i in range(self.execute_gen_len):
+        for i in tqdm(range(self.execute_gen_len)):
             timers("generate").start()
             for k in range(self.num_gpu_batches):
                 self.update_attention_mask(i, k)

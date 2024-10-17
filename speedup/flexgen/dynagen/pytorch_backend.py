@@ -1597,4 +1597,4 @@ class TorchCPUWeightTensorManager:
                 general_copy(weight, None, cpu_weight, None)
             weight_home.val[i] = weight
 
-        weight_read_buf.clear()
+        # weight_read_buf.clear()
