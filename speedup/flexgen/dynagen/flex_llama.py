@@ -20,6 +20,7 @@ from flexgen.pytorch_backend import (
     fix_recursive_import,
     TorchCPUWeightTensorManager,
     DeviceType,
+    general_copy,
 )
 from flexgen.flex_opt import (
     Policy,
@@ -208,6 +209,89 @@ class LlamaSelfAttention(SelfAttention):
                     w_o.smart_copy(dst1),
                 )
             )
+
+    def load_cache(self, cache_home, cache_read_buf, i):
+        if i == 0:  # prefill, no cache
+            return
+
+        k_home, v_home = cache_home.val
+
+        # Pick code path
+        if self.policy.compress_cache:
+            path = 0
+            dst = self.attention_compute.compressed_device
+        else:
+            if self.policy.cpu_cache_compute:
+                if k_home.device.device_type == DeviceType.MIXED and k_home.data[0][0] is not None:
+                    path = 2
+                else:
+                    path = 1
+            else:
+                path = 0
+            dst = self.attention_compute
+
+        if path == 0:  # Direct copy
+            # shape: (s, b * n_head, head_dim)
+            indices = (slice(0, self.task.prompt_len + i), slice(0, k_home.shape[1]))
+
+            if self.policy.attn_sparsity >= 1.0:
+                cache_read_buf.store(
+                    (
+                        k_home.smart_copy(dst, indices),
+                        v_home.smart_copy(dst, indices),
+                    )
+                )
+            else:
+                cache_read_buf.store(
+                    (
+                        k_home.smart_copy(dst, indices),
+                        (v_home, False),
+                    )
+                )
+        elif path == 1:  # Copy to CPU temporary workspace
+            # shape: (s, b * n_head, head_dim)
+            k_buf, v_buf = dst.next_attention_compute_workspace()
+            indices = (slice(0, self.task.prompt_len + i - 1), slice(0, k_home.shape[1]))
+            general_copy(k_buf, indices, k_home, indices)
+
+            if self.policy.attn_sparsity >= 1.0:
+                general_copy(v_buf, indices, v_home, indices)
+                cache_read_buf.store(((k_buf, False), (v_buf, False)))
+            else:
+                cache_read_buf.store(((k_buf, False), ((v_home, v_buf), False)))
+        elif path == 2:  # Copy to both GPU and CPU
+            # The caches are stored on both GPU and other devices.
+            # Compute attention on gpu for caches stored on gpu.
+            # Compute attention on cpu for caches stored on cpu/disk.
+            gpu_k_buf = k_home.data[0][0]
+            gpu_v_buf = v_home.data[0][0]
+
+            # shape: (s, b * n_head, head_dim)
+            k_buf, v_buf = dst.next_attention_compute_workspace()
+            indices = (slice(0, self.task.prompt_len + i - 1), slice(gpu_k_buf.shape[1], k_home.shape[1]))
+            general_copy(k_buf, indices, k_home, indices)
+            general_copy(v_buf, indices, v_home, indices)
+            cache_read_buf.store(
+                (
+                    (
+                        (
+                            gpu_k_buf,
+                            k_buf,
+                        ),
+                        False,
+                    ),
+                    (
+                        (
+                            gpu_v_buf,
+                            v_buf,
+                        ),
+                        False,
+                    ),
+                )
+            )
+            assert self.policy.attn_sparsity >= 1.0
+        else:
+            raise ValueError(f"Invalid path: {path}")
 
     def init_cache_one_gpu_batch(self, cache_home):
         if self.policy.cache_gpu_percent == 100:
@@ -417,6 +501,12 @@ class LlamaLM(OptLM):
             download_llama_weights(self.config.name, self.config.org, self.path, self.config.hf_token)
 
         self.layers[j].init_weight(self.weight_manager, self.weight_home[j], expanded_path)
+
+    def delete_cache(self, j, k):
+        v = self.cache_home[j][k].pop()
+        if v:
+            for x in v:
+                x.delete()
 
     def generate(
         self,
