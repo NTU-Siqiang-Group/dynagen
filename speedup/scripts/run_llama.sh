@@ -17,8 +17,8 @@ do
   # for MODEL in "princeton-nlp/Llama-3-8B-ProLong-64k-Base" 
   do
     CMD="--model $MODEL"
-    CMD=$CMD" --percent 100 0 50 50 100 0"
-    CMD=$CMD" --gpu-batch-size 2 --num-gpu-batches 2 --prompt-len 32 --gen-len 2048"
+    CMD=$CMD" --percent 40 60 100 0 100 0"
+    CMD=$CMD" --gpu-batch-size 8 --num-gpu-batches 1 --prompt-len 32 --gen-len 4096"
     if [ "$SCHEME" = "int4" ]
     then
       CMD=$CMD" --compress-cache"

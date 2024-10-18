@@ -746,7 +746,6 @@ def run_flexgen(args):
             cut_gen_len=cut_gen_len,
             verbose=args.verbose,
         )
-        print(output_ids)
         costs = timers("generate").costs
     finally:
         env.close_copy_threads()
