@@ -11,6 +11,8 @@ import time
 from typing import Union, List, Optional
 import sys
 
+from tqdm import tqdm
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 parent_dir = os.path.dirname(current_dir)
@@ -23,10 +25,8 @@ from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.opt_config import OptConfig, get_opt_config, download_opt_weights
 from flexgen.pytorch_backend import (
-    TorchCPUWeightTensorManager,
     TorchDevice,
     TorchDisk,
-    TorchLink,
     TorchMixedDevice,
     DeviceType,
     general_copy,
@@ -49,6 +49,9 @@ from flexgen.utils import (
     write_benchmark_log,
     read_benchmark_log,
 )
+
+from dynagen.weight_tensor_manager import TorchCPUWeightTensorManager
+from dynagen.cache_tensor_manager import TorchCacheTensorDevice
 
 fix_recursive_import()
 
@@ -140,9 +143,9 @@ class InputEmbed:
 
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_token, w_pos = weight_home.val
@@ -166,6 +169,9 @@ class InputEmbed:
         pass  # do nothing
 
     def store_cache(self, cache_home, cache_write_buf, i):
+        pass  # do nothing
+
+    def set_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
@@ -232,9 +238,9 @@ class OutputEmbed:
 
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, b_ln, w_token = weight_home.val
@@ -261,6 +267,9 @@ class OutputEmbed:
         pass  # do nothing
 
     def store_cache(self, cache_home, cache_write_buf, i):
+        pass  # do nothing
+
+    def set_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
@@ -347,9 +356,9 @@ class SelfAttention:
 
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight_home.val
@@ -381,15 +390,9 @@ class SelfAttention:
         return weight_stats
 
     def init_cache_one_gpu_batch(self, cache_home):
-        if self.policy.cache_gpu_percent == 100:
-            device = self.env.gpu
-        elif self.policy.cache_cpu_percent == 100:
-            device = self.env.cpu
-        elif self.policy.cache_disk_percent == 100:
-            device = self.env.disk
-        else:
-            device = self.env.mixed
+        device = self.env.cache_mixed
 
+        # TODO: support compressed cache
         if self.policy.compress_cache:
             assert device.device_type != DeviceType.MIXED
             device = device.compressed_device
@@ -492,7 +495,7 @@ class SelfAttention:
     def store_cache(self, cache_home, cache_write_buf, i):
         # shape: (s, b * n_head, head_dim)
         k_home, v_home = cache_home.val
-        k_new, v_new = cache_write_buf.pop()
+        k_new, v_new = cache_write_buf.val
 
         if i == self.task.gen_len - 1:  # last token, no need to store cache
             return
@@ -503,8 +506,17 @@ class SelfAttention:
             pos = self.task.prompt_len + i
             indices = (slice(pos - k_new.shape[0], pos), slice(0, k_new.shape[1]))
 
-        general_copy(k_home, indices, k_new, None)
-        general_copy(v_home, indices, v_new, None)
+        k_home.store_cache(indices, k_new)
+        v_home.store_cache(indices, v_new)
+
+    def set_cache(self, cache_home, cache_write_buf, i):
+        if i == self.task.gen_len - 1:  # last token, no need to set cache
+            return
+
+        k_home, v_home = cache_home.val
+        k_buf, v_buf = cache_write_buf.pop()
+        k_home.set_cache_percents(self.policy, self.config.n_head, k_buf)
+        v_home.set_cache_percents(self.policy, self.config.n_head, v_buf)
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
@@ -643,9 +655,9 @@ class MLP:
 
         weight_home.store([None] * len(weight_specs))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, self.policy)
+        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         wi, bi, wo, bo, w_ln, b_ln = weight_home.val
@@ -679,6 +691,9 @@ class MLP:
         pass  # do nothing
 
     def store_cache(self, cache_home, cache_write_buf, i):
+        pass  # do nothing
+
+    def set_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
@@ -734,10 +749,10 @@ class TransformerLayer:
         self.mlp.init_weight(weight_manager, home2, path)
         weight_home.store((home1, home2))
 
-    def set_weight(self, weight_manager, weight_home, path):
+    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
         home1, home2 = weight_home.val
-        self.attention.set_weight(weight_manager, home1, path)
-        self.mlp.set_weight(weight_manager, home2, path)
+        self.attention.set_weight(weight_manager, home1, weight_read_buf, path)
+        self.mlp.set_weight(weight_manager, home2, weight_read_buf, path)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         read_buf1, read_buf2 = ValueHolder(), ValueHolder()
@@ -837,7 +852,7 @@ class OptLM:
         self.init_all_weights()
 
         self.w_percent = {}
-        self.keep_load_gpu_weight = False
+        # self.keep_load_gpu_weight = False
         self.compute = self.env.gpu
         self.weight_load_dst = (
             self.compute.compressed_device if policy.compress_weight else self.compute
@@ -872,12 +887,18 @@ class OptLM:
 
         self.layers[j].init_weight(self.weight_manager, self.weight_home[j], expanded_path)
 
-    def set_weight(self):
+    def set_weight(self, i, j):
+        # Handle corner cases
+        if j == self.num_layers:
+            j = 0
+            i += 1
+            if i == self.execute_gen_len:
+                return
+
         expanded_path = os.path.abspath(
             os.path.expanduser(os.path.join(self.path, f"{self.config.name}-np"))
         )
-        for j in range(self.num_layers):
-            self.layers[j].set_weight(self.weight_manager, self.weight_home[j], expanded_path)
+        self.layers[j].set_weight(self.weight_manager, self.weight_home[j], self.weight_read_buf[j], expanded_path)
 
     def load_weight(self, i, j, k, overlap=True):
         # Load weights only at the first batch
@@ -984,7 +1005,6 @@ class OptLM:
             return
 
         # Store cache_write_buf to cache_home
-        # Delete cache_write_buf
         if overlap:
             with torch.cuda.stream(self.store_cache_stream):
                 self.layers[j].store_cache(
@@ -994,6 +1014,22 @@ class OptLM:
             self.layers[j].store_cache(
                 self.cache_home[j][k], self.cache_write_buf[j][k], i
             )
+
+    def set_cache(self, i, j, k):
+        # Handle corner cases
+        if k == -1:
+            k = self.policy.num_gpu_batches - 1
+            j -= 1
+        if j == -1:
+            j = self.num_layers - 1
+            i -= 1
+            if i == -1:
+                return
+        if i == self.task.gen_len - 1:  # last token, no need to set cache
+            self.cache_write_buf[j][k].clear()
+            return
+
+        self.layers[j].set_cache(self.cache_home[j][k], self.cache_write_buf[j][k], i)
 
     def delete_cache(self, j, k):
         v = self.cache_home[j][k].pop()
@@ -1087,6 +1123,11 @@ class OptLM:
         for j in range(self.num_layers):
             self.delete_weight(j, 0)
 
+    # def set_all_cache(self, i):
+    #     for j in range(self.num_layers):
+    #         for k in range(self.policy.num_gpu_batches):
+    #             self.set_cache(i, j, k)
+
     def update_attention_mask(self, i, k):
         if i > 0:
             mask = self.attention_mask[k]
@@ -1139,7 +1180,6 @@ class OptLM:
         overlap = self.policy.overlap
         prompt_len, gen_len = task.prompt_len, task.gen_len
         self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
-        self.set_weight()
         self.set_home(self.policy.num_gpu_batches)
 
         # Output token ids
@@ -1217,34 +1257,60 @@ class OptLM:
 
         return self.output_ids
 
-    def generation_loop_overlap_single_batch(self, evaluate):
-        if (
-            self.w_percent != {}
-            and self.w_percent[self.env.gpu.name] < self.policy.w_gpu_percent
-        ):
-            self.keep_load_gpu_weight = True
-        else:
-            self.keep_load_gpu_weight = False
-        # Prologue
-        batch_sizes = [2, 2, 2, 2, 2]
-        cache_gpu_percents = [100, 100, 100, 100, 100]
-        w_gpu_percents = [20, 40, 60, 80, 100]
+    def generation_loop_normal(self, evaluate):
+        # FIXME: cannot adjust batch size
+        # batch_sizes = [2, 2, 2, 2, 2]
+        cache_gpu_percents = [60, 50, 60, 40, 70]
+        w_gpu_percents = [30, 40, 30, 40, 10]
         policy = self.policy
-        policy.gpu_batch_size = batch_sizes[0]
-        policy.cache_gpu_percent = cache_gpu_percents[0]
-        policy.cache_cpu_percent = 100 - cache_gpu_percents[0]
-        policy.w_gpu_percent = w_gpu_percents[0]
-        policy.w_cpu_percent = 100 - w_gpu_percents[0]
-        self.set_weight()
+
+        print("policy:", policy)
+
+        for i in tqdm(range(self.execute_gen_len)):
+            timers("generate").start()
+            for k in range(self.num_gpu_batches):
+                self.update_attention_mask(i, k)
+            for j in range(self.num_layers):
+                for k in range(self.num_gpu_batches):
+                    self.set_weight(i, j)
+                    self.load_weight(i, j, k)
+                    self.load_cache(i, j, k)
+                    self.load_hidden(i, j, k)
+                    self.compute_layer(i, j, k)
+                    if evaluate and j == self.num_layers - 1:
+                        self.sync()
+                        break
+                    self.sync()
+                    self.store_hidden(i, j, k)
+                    self.store_cache(i, j, k)
+                    self.set_cache(i, j, k)
+            if i < self.execute_gen_len and i < len(cache_gpu_percents):
+                # policy.gpu_batch_size = batch_sizes[i]
+                policy.cache_gpu_percent = cache_gpu_percents[i]
+                policy.cache_cpu_percent = 100 - cache_gpu_percents[i]
+                policy.w_gpu_percent = w_gpu_percents[i]
+                policy.w_cpu_percent = 100 - w_gpu_percents[i]
+                print("policy:", policy)
+                self.set_policy(policy)
+            timers("generate").stop()
+
+    def generation_loop_overlap_single_batch(self, evaluate):
+        # Prologue
+        # batch_sizes = [2, 2, 2, 2, 2]
+        cache_gpu_percents = [100, 100, 100, 100, 100]
+        w_gpu_percents = [20, 40, 30, 40, 30]
+        policy = self.policy
+
+        self.set_weight(0, 0)
         self.load_weight(0, 0, 0)
         self.sync()
 
         # Generate
-
-        for i in range(self.execute_gen_len):
+        for i in tqdm(range(self.execute_gen_len)):
             timers("generate").start()
             self.update_attention_mask(i, 0)
             for j in range(self.num_layers):
+                self.set_weight(i, j + 1)
                 self.load_weight(i, j + 1, 0)
                 self.load_cache(i, j + 1, 0)
                 self.load_hidden(i, j, 0)
@@ -1255,69 +1321,58 @@ class OptLM:
                 self.store_cache(i, j - 1, 0)
                 # FIXME
                 self.store_hidden(i, j, 0)
+                self.set_cache(i, j, 0)
                 self.sync()
-            if i + 1 < len(batch_sizes):
-                policy.gpu_batch_size = batch_sizes[i + 1]
-                policy.cache_gpu_percent = cache_gpu_percents[i + 1]
-                policy.cache_cpu_percent = 100 - cache_gpu_percents[i + 1]
-                policy.w_gpu_percent = w_gpu_percents[i + 1]
-                policy.w_cpu_percent = 100 - w_gpu_percents[i + 1]
+            if i < self.execute_gen_len and i < len(cache_gpu_percents):
+                # policy.gpu_batch_size = batch_sizes[i]
+                policy.cache_gpu_percent = cache_gpu_percents[i]
+                policy.cache_cpu_percent = 100 - cache_gpu_percents[i]
+                policy.w_gpu_percent = w_gpu_percents[i]
+                policy.w_cpu_percent = 100 - w_gpu_percents[i]
                 print("policy:", policy)
                 self.set_policy(policy)
-                self.set_weight()
             timers("generate").stop()
 
             if self.task.stop and np.all(self.stopped):
                 break
 
     def generation_loop_overlap_multi_batch(self):
-        if (
-            self.w_percent != {}
-            and self.w_percent[self.env.gpu.name] < self.policy.w_gpu_percent
-        ):
-            self.keep_load_gpu_weight = True
-        else:
-            self.keep_load_gpu_weight = False
         # Prologue
-        batch_sizes = [2, 2, 2, 2, 2]
+        # batch_sizes = [2, 2, 2, 2, 2]
         cache_gpu_percents = [100, 100, 100, 100, 100]
-        w_gpu_percents = [20, 40, 60, 80, 100]
+        w_gpu_percents = [20, 40, 30, 40, 30]
         policy = self.policy
-        policy.gpu_batch_size = batch_sizes[0]
-        policy.cache_gpu_percent = cache_gpu_percents[0]
-        policy.cache_cpu_percent = 100 - cache_gpu_percents[0]
-        policy.w_gpu_percent = w_gpu_percents[0]
-        policy.w_cpu_percent = 100 - w_gpu_percents[0]
-        self.set_weight()
+
+        self.set_weight(0, 0)
         for k in range(self.policy.num_gpu_batches):
             self.load_weight(0, 0, k)
         self.load_hidden(0, 0, 0)
         self.sync()
 
         # Generate
-
-        for i in range(self.execute_gen_len):
+        for i in tqdm(range(self.execute_gen_len)):
             timers("generate").start()
             for k in range(self.policy.num_gpu_batches):
                 self.update_attention_mask(i, k)
             for j in range(self.num_layers):
                 for k in range(self.policy.num_gpu_batches):
+                    self.set_weight(i, j + 1)
                     self.load_weight(i, j + 1, k)
                     self.load_cache(i, j, k + 1)
                     self.store_hidden(i, j, k - 1)
                     self.load_hidden(i, j, k + 1)
                     self.compute_layer(i, j, k)
                     self.store_cache(i, j, k - 1)
+                    self.set_cache(i, j, k - 1)
                     self.sync()
-            if i + 1 < len(batch_sizes):
-                policy.gpu_batch_size = batch_sizes[i + 1]
-                policy.cache_gpu_percent = cache_gpu_percents[i + 1]
-                policy.cache_cpu_percent = 100 - cache_gpu_percents[i + 1]
-                policy.w_gpu_percent = w_gpu_percents[i + 1]
-                policy.w_cpu_percent = 100 - w_gpu_percents[i + 1]
+            if i < self.execute_gen_len and i < len(cache_gpu_percents):
+                # policy.gpu_batch_size = batch_sizes[i]
+                policy.cache_gpu_percent = cache_gpu_percents[i]
+                policy.cache_cpu_percent = 100 - cache_gpu_percents[i]
+                policy.w_gpu_percent = w_gpu_percents[i]
+                policy.w_cpu_percent = 100 - w_gpu_percents[i]
                 print("policy:", policy)
                 self.set_policy(policy)
-                self.set_weight()
             timers("generate").stop()
 
         # Epilogue
@@ -1382,7 +1437,7 @@ def run_flexgen(args):
     cpu = TorchDevice("cpu")
     disk = TorchDisk(args.offload_dir)
     env = ExecutionEnv(
-        gpu=gpu, cpu=cpu, disk=disk, mixed=TorchMixedDevice([gpu, cpu, disk])
+        gpu=gpu, cpu=cpu, disk=disk, mixed=TorchMixedDevice([gpu, cpu, disk]), cache_mixed=TorchCacheTensorDevice([gpu, cpu, disk])
     )
 
     policy = Policy(

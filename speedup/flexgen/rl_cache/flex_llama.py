@@ -4,23 +4,15 @@ python3 -m flexgen.flex_llama --model meta-llama/Llama-2-7b-chat-hf --gpu-batch-
 """
 
 import os
+import numpy as np
 import torch
 import argparse
-import pynvml
-import numpy as np
+from typing import List, Optional, Union
 from tqdm import tqdm
-from typing import Union, List, Optional
 from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
-from flexgen.pytorch_backend import (
-    LlamaTorchDevice,
-    TorchDisk,
-    TorchMixedDevice,
-    fix_recursive_import,
-    DeviceType,
-    general_copy,
-)
+from flexgen.pytorch_backend import DeviceType, LlamaTorchDevice, TorchDisk, TorchMixedDevice, fix_recursive_import, general_copy
 from flexgen.flex_opt import (
     Policy,
     InputEmbed,
@@ -34,8 +26,8 @@ from flexgen.flex_opt import (
 from flexgen.timer import timers
 from flexgen.utils import (
     ExecutionEnv,
-    Task,
     GB,
+    Task,
     ValueHolder,
     array_1d,
     array_2d,
@@ -70,6 +62,15 @@ class LlamaInputEmbed(InputEmbed):
         if k == 0:
             dst = self.weight_load_dst
             weight_read_buf.store((w_token.smart_copy(dst),))
+
+        weight_stats = {}
+        for weight in (w_token,):
+            if weight.device.name in weight_stats:
+                weight_stats[weight.device.name] += weight.bytes
+            else:
+                weight_stats[weight.device.name] = weight.bytes
+
+        return weight_stats
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         # Compute input embedding
@@ -108,6 +109,15 @@ class LlamaOutputEmbed(OutputEmbed):
             dst2 = self.compute
             weight_read_buf.store((w_ln.smart_copy(dst2), w_token.smart_copy(dst1)))
 
+        weight_stats = {}
+        for weight in (w_ln, w_token):
+            if weight.device.name in weight_stats:
+                weight_stats[weight.device.name] += weight.bytes
+            else:
+                weight_stats[weight.device.name] = weight.bytes
+
+        return weight_stats
+
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 3
         h, donate[0] = hidden.val, True
@@ -117,6 +127,7 @@ class LlamaOutputEmbed(OutputEmbed):
             (w_ln, donate[1]), (w_token, donate[2]) = weight_read_buf.pop()
         else:
             (w_ln, _), (w_token, _) = weight_read_buf.val
+
         h = self.compute.llama_output_embed(
             h,
             w_ln,
@@ -132,15 +143,7 @@ class LlamaOutputEmbed(OutputEmbed):
 
 class LlamaSelfAttention(SelfAttention):
     def __init__(self, config, env, policy, layer_id):
-        self.config = config
-        self.env = env
-        self.layer_id = layer_id
-        self.policy = policy
-        self.compute = self.env.gpu
-        self.weight_load_dst = self.compute.compressed_device if policy.compress_weight else self.compute
-        self.attention_compute = self.env.cpu if self.policy.cpu_cache_compute else self.env.gpu
-
-        self.task = None
+        super().__init__(config, env, policy, layer_id)
 
     def get_weight_specs(self, path):
         h, n_head, n_kv_head, dtype = (
@@ -166,10 +169,6 @@ class LlamaSelfAttention(SelfAttention):
             ((n_head * head_dim, h), dtype, path + "self_attn.o_proj.weight"),
         ]
 
-    def set_weight(self, weight_manager, weight_home, weight_read_buf, path):
-        weight_specs = self.get_weight_specs(path)
-        weight_manager.set_weight_home(weight_home, weight_specs, weight_read_buf, self.policy)
-
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, w_q, w_k, w_v, w_re, w_o = weight_home.val
         if k == 0:
@@ -185,6 +184,15 @@ class LlamaSelfAttention(SelfAttention):
                     w_o.smart_copy(dst1),
                 )
             )
+
+        weight_stats = {}
+        for weight in (w_ln, w_q, w_k, w_v, w_re, w_o):
+            if weight.device.name in weight_stats:
+                weight_stats[weight.device.name] += weight.bytes
+            else:
+                weight_stats[weight.device.name] = weight.bytes
+
+        return weight_stats
 
     def load_cache(self, cache_home, cache_read_buf, i):
         if i == 0:  # prefill, no cache
@@ -346,7 +354,6 @@ class LlamaSelfAttention(SelfAttention):
                 self.policy.compress_cache,
                 self.policy.comp_cache_config,
             )
-
             cache_write_buf.store((new_k_cache, new_v_cache))
 
         hidden.val = h
@@ -378,6 +385,15 @@ class LlamaMLP(MLP):
             weight_read_buf.store(
                 (w_ln.smart_copy(dst2), w_g.smart_copy(dst1), w_u.smart_copy(dst1), w_d.smart_copy(dst1))
             )
+
+        weight_stats = {}
+        for weight in (w_ln, w_g, w_u, w_d):
+            if weight.device.name in weight_stats:
+                weight_stats[weight.device.name] += weight.bytes
+            else:
+                weight_stats[weight.device.name] = weight.bytes
+
+        return weight_stats
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 5
@@ -455,6 +471,12 @@ class LlamaLM(OptLM):
         self.weight_manager = TorchCPUWeightTensorManager(self.env)
         self.init_all_weights()
 
+        self.w_percent = {}
+        self.compute = self.env.gpu
+        self.weight_load_dst = (
+            self.compute.compressed_device if policy.compress_weight else self.compute
+        )
+
     def init_weight(self, j):
         expanded_path = os.path.abspath(os.path.expanduser(os.path.join(self.path, f"{self.config.name}-np")))
         check_path = os.path.join(expanded_path, "embed_tokens.weight")
@@ -462,12 +484,6 @@ class LlamaLM(OptLM):
             download_llama_weights(self.config.name, self.config.org, self.path, self.config.hf_token)
 
         self.layers[j].init_weight(self.weight_manager, self.weight_home[j], expanded_path)
-
-    def delete_cache(self, j, k):
-        v = self.cache_home[j][k].pop()
-        if v:
-            for x in v:
-                x.delete()
 
     def generate(
         self,
@@ -507,7 +523,7 @@ class LlamaLM(OptLM):
         self.output_ids = np.full((len(task.inputs), prompt_len + gen_len), self.config.pad_token_id, dtype=np.int32)
         self.stopped = np.zeros((len(task.inputs), 1), dtype=bool)
         self.output_ids[:, :prompt_len] = np.asarray(task.inputs)
-        assert gpu_batch_size * num_gpu_batches == len(task.inputs)
+        # assert gpu_batch_size * num_gpu_batches == len(task.inputs)
 
         # Intermediate tensors
         # The following buffers store values used
@@ -533,10 +549,12 @@ class LlamaLM(OptLM):
             self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
 
         # Generate
+        # self.generation_loop_normal(evaluate)
         if num_gpu_batches == 1:
             self.generation_loop_overlap_single_batch(evaluate)
         else:
             self.generation_loop_overlap_multi_batch()
+
         for j in range(num_layers):
             for k in range(num_gpu_batches):
                 self.delete_cache(j, k)
@@ -578,13 +596,24 @@ class LlamaLM(OptLM):
         else:
             self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
 
-    # def set_weight(self):
+    # def set_weight(self, i, j):
+    #     # Handle corner cases
+    #     if j == self.num_layers:
+    #         j = 0
+    #         i += 1
+    #         if i == self.execute_gen_len:
+    #             return
+
     #     expanded_path = os.path.abspath(os.path.expanduser(os.path.join(self.path, f"{self.config.name}-np")))
-    #     for j in range(self.num_layers):
-    #         self.layers[j].set_weight(self.weight_manager, self.weight_home[j], self.weight_read_buf[j], expanded_path)
+    #     self.layers[j].set_weight(self.weight_manager, self.weight_home[j], self.weight_read_buf[j], expanded_path)
 
     def generation_loop_overlap_single_batch(self, evaluate):
         # Prologue
+        # batch_sizes = [2, 2, 2, 2, 2]
+        cache_gpu_percents = [100, 100, 100, 100, 100]
+        w_gpu_percents = [20, 40, 30, 40, 30]
+        policy = self.policy
+
         self.set_weight(0, 0)
         self.load_weight(0, 0, 0)
         self.sync()
@@ -606,6 +635,14 @@ class LlamaLM(OptLM):
                 self.set_cache(i, j - 1, 0)
                 self.store_hidden(i, j, 0)
                 self.sync()
+            if i < len(cache_gpu_percents) and i < len(cache_gpu_percents):
+                # policy.gpu_batch_size = batch_sizes[i]
+                policy.cache_gpu_percent = cache_gpu_percents[i]
+                policy.cache_cpu_percent = 100 - cache_gpu_percents[i]
+                policy.w_gpu_percent = w_gpu_percents[i]
+                policy.w_cpu_percent = 100 - w_gpu_percents[i]
+                print("policy:", policy)
+                self.set_policy(policy)
             timers("generate").stop()
 
             if self.task.stop and np.all(self.stopped):
@@ -613,6 +650,11 @@ class LlamaLM(OptLM):
 
     def generation_loop_overlap_multi_batch(self):
         # Prologue
+        # batch_sizes = [2, 2, 2, 2, 2]
+        cache_gpu_percents = [100, 100, 100, 100, 100]
+        w_gpu_percents = [20, 40, 30, 40, 30]
+        policy = self.policy
+
         self.set_weight(0, 0)
         for k in range(self.num_gpu_batches):
             self.load_weight(0, 0, k)
@@ -635,6 +677,14 @@ class LlamaLM(OptLM):
                     self.store_cache(i, j, k - 1)
                     self.set_cache(i, j, k - 1)
                     self.sync()
+            if i < self.execute_gen_len and i < len(cache_gpu_percents):
+                # policy.gpu_batch_size = batch_sizes[i]
+                policy.cache_gpu_percent = cache_gpu_percents[i]
+                policy.cache_cpu_percent = 100 - cache_gpu_percents[i]
+                policy.w_gpu_percent = w_gpu_percents[i]
+                policy.w_cpu_percent = 100 - w_gpu_percents[i]
+                print("policy:", policy)
+                self.set_policy(policy)
             timers("generate").stop()
 
         # Epilogue

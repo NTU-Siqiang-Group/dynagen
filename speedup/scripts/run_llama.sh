@@ -25,7 +25,7 @@ do
     elif [ "$SCHEME" = "h2o" ]
     then
       CMD=$CMD" --max-num-kv 409 --hh-ratio 0.1 --hh-all"
-    elif [ "$SCHEME" = "infinigen" ]
+    elif [ "$SCHEME" = "dynagen" ]
     then
       CMD=$CMD # " --warmup-input-path ../test.txt --test-input-path ../test.txt --alpha 10 --partial-weight-ratio 0.1 --max-num-kv 8192"
     fi

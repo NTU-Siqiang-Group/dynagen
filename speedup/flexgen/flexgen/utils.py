@@ -40,15 +40,17 @@ class ExecutionEnv:
     cpu: Any = None
     disk: Any = None
     mixed: Any = None
+    cache_mixed: Any = None
 
     @classmethod
     def create(cls, offload_dir):
         # fix recursive import
         from flexgen.pytorch_backend import TorchDevice, TorchDisk, TorchMixedDevice
+        from dynagen.cache_tensor_manager import TorchCacheTensorDevice
         gpu = TorchDevice("cuda:0")
         cpu = TorchDevice("cpu")
         disk = TorchDisk(offload_dir)
-        return cls(gpu=gpu, cpu=cpu, disk=disk, mixed=TorchMixedDevice([gpu, cpu, disk]))
+        return cls(gpu=gpu, cpu=cpu, disk=disk, mixed=TorchMixedDevice([gpu, cpu, disk]), cache_mixed=TorchCacheTensorDevice([gpu, cpu, disk]))
 
     def close_copy_threads(self):
         self.disk.close_copy_threads()
