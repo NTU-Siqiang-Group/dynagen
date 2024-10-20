@@ -105,7 +105,7 @@ def get_llama_config(name, **kwargs):
             num_hidden_layers=80,
             num_key_value_heads=8,
         )
-    elif "llama3" in arch_name or "llama-3" in arch_name or "Llama-3" in arch_name:
+    elif "8B" in arch_name or "8b" in arch_name:
         config = LlamaConfig(
             name=name,
             org=org,
@@ -114,6 +114,18 @@ def get_llama_config(name, **kwargs):
             intermediate_size=14336,
             n_head=32,
             num_hidden_layers=32,
+            num_key_value_heads=8,
+            vocab_size=128256,
+        )
+    elif "70B" in arch_name:
+        config = LlamaConfig(
+            name=name,
+            org=org,
+            hf_token=kwargs.get("hf_token"),
+            input_dim=8192,
+            intermediate_size=28672,
+            n_head=64,
+            num_hidden_layers=80,
             num_key_value_heads=8,
             vocab_size=128256,
         )

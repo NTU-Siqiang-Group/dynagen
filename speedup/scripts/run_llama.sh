@@ -14,11 +14,11 @@ do
   for MODEL in "THUDM/LongWriter-llama3.1-8b"
   # for MODEL in "meta-llama/Meta-Llama-3.1-8B"
   # for MODEL in "NurtureAI/Meta-Llama-3-8B-Instruct-32k"
-  # for MODEL in "princeton-nlp/Llama-3-8B-ProLong-64k-Base" 
+  # for MODEL in "meta-llama/Llama-3.1-70B-Instruct" 
   do
     CMD="--model $MODEL"
-    CMD=$CMD" --percent 40 60 100 0 100 0"
-    CMD=$CMD" --gpu-batch-size 8 --num-gpu-batches 1 --prompt-len 32 --gen-len 4096"
+    CMD=$CMD" --percent 100 0 50 50 100 0"
+    CMD=$CMD" --gpu-batch-size 2 --num-gpu-batches 2 --prompt-len 32 --gen-len 4096"
     if [ "$SCHEME" = "int4" ]
     then
       CMD=$CMD" --compress-cache"
