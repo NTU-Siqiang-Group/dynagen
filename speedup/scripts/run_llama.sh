@@ -1,6 +1,6 @@
 FLEXGEN_PATH=$PWD/../flexgen
 # for SCHEME in "original" "int4" "h2o" "dynagen"
-for SCHEME in "dynagen"
+for SCHEME in "original"
 do
   rm $FLEXGEN_PATH/flexgen/flex_llama.py
   rm $FLEXGEN_PATH/flexgen/flex_opt.py
@@ -10,10 +10,8 @@ do
   ln -s ../$SCHEME/flex_opt.py $FLEXGEN_PATH/flexgen/flex_opt.py
   ln -s ../$SCHEME/pytorch_backend.py $FLEXGEN_PATH/flexgen/pytorch_backend.py
   
-  # for MODEL in "meta-llama/Llama-2-13b-chat-hf"
-  for MODEL in "THUDM/LongWriter-llama3.1-8b"
-  # for MODEL in "meta-llama/Meta-Llama-3.1-8B"
-  # for MODEL in "NurtureAI/Meta-Llama-3-8B-Instruct-32k"
+
+  for MODEL in "meta-llama/Llama-3.1-8B-Instruct"
   # for MODEL in "meta-llama/Llama-3.1-70B-Instruct" 
   do
     CMD="--model $MODEL"
