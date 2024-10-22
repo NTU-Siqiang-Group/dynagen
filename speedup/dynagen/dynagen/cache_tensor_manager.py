@@ -28,7 +28,7 @@ class TorchCacheTensor(TorchTensor):
         '''
         shape = self.shape
         seg_lengths = self.device.get_seg_lengths(policy, self.shape, num_head) # (len_gpu, len_cpu, len_disk)
-        is_using_buf = cache_write_buf is not None and cache_write_buf.device.device_type == DeviceType.CUDA
+        is_using_buf = cache_write_buf and cache_write_buf.device and cache_write_buf.device.device_type == DeviceType.CUDA
 
         seg_points = [0]
         for l in seg_lengths:
@@ -63,7 +63,6 @@ class TorchCacheTensor(TorchTensor):
                 tensors[i] = tensor
 
         self.data = (tensors, seg_points)
-        cache_write_buf.delete()
 
 
 class TorchCacheTensorDevice(TorchMixedDevice):

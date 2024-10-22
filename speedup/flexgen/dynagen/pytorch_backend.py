@@ -961,7 +961,7 @@ def map_to_torch_tensor(tensor, indices):
     return data[indices] if indices else data
 
 
-def copy_worker_func(queue, cuda_id):
+def copy_worker_func(queue:queue.Queue, cuda_id):
     """The copy worker thread."""
     torch.cuda.set_device(cuda_id)
 
@@ -987,7 +987,7 @@ def copy_worker_func(queue, cuda_id):
                 dst_data.copy_(tmp_cpu_buf)
             else:
                 dst_data.copy_(src_data)
-
+            src.delete()
             queue.task_done()
 
 
