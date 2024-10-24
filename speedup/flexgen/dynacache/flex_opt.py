@@ -364,7 +364,7 @@ class SelfAttention:
             return
 
         k_home, v_home = cache_home.val
-
+        # print(k_home)
         # Pick code path
         if self.policy.compress_cache:
             path = 0
@@ -456,6 +456,7 @@ class SelfAttention:
             pos = self.task.prompt_len + i
             indices = (slice(pos - k_new.shape[0], pos), slice(0, k_new.shape[1]))
 
+        # print(k_home, k_new)
         general_copy(k_home, indices, k_new, None)
         general_copy(v_home, indices, v_new, None)
 
@@ -925,6 +926,7 @@ class OptLM:
         cut_gen_len: Optional[int] = None,
         verbose: int = 0,
         evaluate: bool = False,
+        warmup: bool = False,
     ):
         if evaluate:
             assert max_new_tokens == 1 and self.num_gpu_batches == 1 and self.policy.gpu_batch_size == 1
@@ -979,11 +981,11 @@ class OptLM:
         if debug_mode is None:
             if not overlap:
                 # No overlap, easy to understand, suitable for debugging
-                self.generation_loop_normal(evaluate)
+                self.generation_loop_normal(evaluate, warmup)
             else:
                 # Overlap I/O and compute
                 if num_gpu_batches == 1:
-                    self.generation_loop_overlap_single_batch(evaluate)
+                    self.generation_loop_overlap_single_batch(evaluate, warmup=warmup)
                 else:
                     self.generation_loop_overlap_multi_batch()
         elif debug_mode == "fewer_batch":

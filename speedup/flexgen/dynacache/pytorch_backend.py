@@ -311,7 +311,7 @@ class TorchDevice:
         shape = (prompt_len + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
         # NOTE: disable pin_memory due to high memory overhead
         pin_memory = False
-        print(self.device_type)
+        # print(self.device_type)
         k_cache = self.allocate(shape, np.float16, pin_memory=pin_memory)
         v_cache = self.allocate(shape, np.float16, pin_memory=pin_memory)
         return k_cache, v_cache

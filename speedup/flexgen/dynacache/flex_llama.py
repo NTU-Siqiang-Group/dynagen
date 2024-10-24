@@ -77,7 +77,7 @@ class LlamaInputEmbed(InputEmbed):
         h = self.compute.llama_input_embed(h, mask, w_token, self.config.pad_token_id, donate)
         hidden.val = h
 
-    def set_cache(self, cache_home, i, j):
+    def set_cache(self, cache_home, policy, i, j):
         pass
 
 
@@ -127,7 +127,7 @@ class LlamaOutputEmbed(OutputEmbed):
         )
         hidden.val = h
 
-    def set_cache(self, cache_home, i, j):
+    def set_cache(self, cache_home, policy, i, j):
         pass
 
 
@@ -247,15 +247,19 @@ class LlamaSelfAttention(SelfAttention):
 
         hidden.val = h
 
-    def set_cache(self, cache_home, i, j):
+    def set_cache(self, cache_home, policy, i, j):
         if i == self.task.gen_len - 1:  # last token, no need to set cache
             return
 
-        k_home, v_home = cache_home.val
-        device = self.env.gpu if self.policy.layer_cache_allocate[j] == True else self.env.cpu
-        print(f"set_cache: i={i}, j={j}, device={device}")
-        k_home.move(device)
-        v_home.move(device)
+        device = self.env.gpu if policy.layer_cache_allocate[j] == True else self.env.cpu
+        k_home, _ = cache_home.val
+        # print(f"set_cache: i={i}, j={j}, device={device}")
+        # print(k_home.device)
+        if device != k_home.device:
+            k_home, v_home = cache_home.pop()
+            k_home = k_home.move(device)
+            v_home = v_home.move(device)
+            cache_home.store((k_home, v_home))
 
 
 class LlamaMLP(MLP):
@@ -300,7 +304,7 @@ class LlamaMLP(MLP):
         h = self.compute.llama_mlp(h, w_ln, w_g, w_u, w_d, self.config.rms_norm_eps, donate)
         hidden.val = h
 
-    def set_cache(self, cache_home, i, j):
+    def set_cache(self, cache_home, policy, i, j):
         pass
 
 
@@ -324,12 +328,12 @@ class LlamaLM(OptLM):
 
         layers = []
         layers.append(LlamaInputEmbed(self.config, self.env, self.policy))
-        attn_layers = 0
+        self.attn_layer = []
         for i in range(self.config.num_hidden_layers):
             if policy.sep_layer:
                 layers.append(LlamaSelfAttention(self.config, self.env, self.policy, i))
+                self.attn_layer.append(len(layers) - 1)
                 layers.append(LlamaMLP(self.config, self.env, self.policy, i))
-                attn_layers += 1
             else:
                 layers.append(LlamaTransformerLayer(self.config, self.env, self.policy, i))
         layers.append(LlamaOutputEmbed(self.config, self.env, self.policy))
@@ -368,15 +372,16 @@ class LlamaLM(OptLM):
         self.init_all_weights()
 
         self.policy.layer_cache_allocate = [False] * num_layers
-        self.policy.layer_cache_budget = int(self.policy.cache_cpu_percent * attn_layers / 100)
+        self.policy.layer_cache_budget = int(self.policy.cache_gpu_percent * len(self.attn_layer) / 100)
         budget = self.policy.layer_cache_budget
         for i, allocate in enumerate(self.policy.layer_cache_allocate):
-            if isinstance(self.layers[i], LlamaSelfAttention):
+            if i in self.attn_layer:
                 if budget > 0:
                     self.policy.layer_cache_allocate[i] = True
                     budget -= 1
                 else:
                     break
+        true_indices = [i for i, value in enumerate(self.policy.layer_cache_allocate) if value]
 
     def init_weight(self, j):
         expanded_path = os.path.abspath(os.path.expanduser(os.path.join(self.path, f"{self.config.name}-np")))
@@ -385,6 +390,21 @@ class LlamaLM(OptLM):
             download_llama_weights(self.config.name, self.config.org, self.path, self.config.hf_token)
 
         self.layers[j].init_weight(self.weight_home[j], expanded_path)
+
+    def set_policy_cache(self, j):
+        budget = self.policy.layer_cache_budget
+        self.policy.layer_cache_allocate = [False] * len(self.policy.layer_cache_allocate)
+        start_pos = self.attn_layer.index(j)
+        allocated = 0
+        while allocated < budget: 
+            current_idx = start_pos % len(self.attn_layer)
+            layer_idx = self.attn_layer[current_idx]
+            self.policy.layer_cache_allocate[layer_idx] = True
+            allocated += 1
+            start_pos += 1
+
+        # true_indices = [i for i, value in enumerate(self.policy.layer_cache_allocate) if value]
+        # print(f"Cache allocated at layers: {true_indices}")
 
     def set_cache(self, i, j, k):
         # Handle corner cases
@@ -400,9 +420,9 @@ class LlamaLM(OptLM):
             self.cache_write_buf[j][k].clear()
             return
 
-        self.layers[j].set_cache(self.cache_home[j][k], i, j)
+        self.layers[j].set_cache(self.cache_home[j][k], self.policy, i, j)
 
-    def generation_loop_overlap_single_batch(self, evaluate):
+    def generation_loop_overlap_single_batch(self, evaluate, warmup=False):
         # Prologue
         self.load_weight(0, 0, 0)
         self.sync()
@@ -416,13 +436,22 @@ class LlamaLM(OptLM):
                 self.load_cache(i, j + 1, 0)
                 self.load_hidden(i, j, 0)
                 self.compute_layer(i, j, 0)
-                if evaluate and j == self.num_layers - 1:
-                    self.sync()
-                    break
+                # if evaluate and j == self.num_layers - 1:
+                #     self.sync()
+                #     break
                 self.store_cache(i, j - 1, 0)
                 self.store_hidden(i, j, 0)
-                self.sync()
-                self.set_cache(i, j, 0)
+                # self.sync()
+                if (
+                    j in self.attn_layer
+                    and self.attn_layer.index(j) % int(self.policy.layer_cache_budget / 2) == 0
+                    and not (j == 1 and i == 0)
+                    and not warmup
+                    and True   
+                ):
+                    self.set_policy_cache(j)
+                    for l in self.attn_layer:
+                        self.set_cache(i, l, 0)
             timers("generate").stop()
 
             if self.task.stop and np.all(self.stopped):
@@ -488,7 +517,7 @@ def run_flexgen(args):
 
     try:
         print("warmup - generate")
-        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
+        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose, warmup=True)
 
         print("benchmark - generate")
         timers("generate").reset()
