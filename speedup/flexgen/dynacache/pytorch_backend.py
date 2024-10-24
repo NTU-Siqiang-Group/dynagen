@@ -8,7 +8,7 @@ import queue
 import shutil
 import time
 import threading
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Optional, Union, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -17,7 +17,6 @@ import numpy as np
 from flexgen.utils import (
     GB,
     T,
-    ValueHolder,
     cpu_mem_stats,
     vector_gather,
     np_dtype_to_torch_dtype,
@@ -43,7 +42,6 @@ class DeviceType(Enum):
     CUDA = auto()
     DISK = auto()
     MIXED = auto()
-    CACHE_MIXED = auto()
     COMPRESSED = auto()
 
     @staticmethod
@@ -56,8 +54,6 @@ class DeviceType(Enum):
             return DeviceType.DISK
         elif name == "mixed":
             return DeviceType.MIXED
-        elif name == "cache_mixed":
-            return DeviceType.CACHE_MIXED
         elif name == "compressed":
             return DeviceType.COMPRESSED
         else:
@@ -115,10 +111,7 @@ class TorchTensor:
 
     def delete(self):
         assert self.device is not None, "already deleted"
-        if (
-            self.device.device_type == DeviceType.DISK
-            or self.device.device_type == DeviceType.MIXED
-        ):
+        if self.device.device_type == DeviceType.DISK:
             self.device.delete(self)
         self.device = self.data = None
 
@@ -143,10 +136,7 @@ class TorchTensor:
     def copy(self, dst, src_indices=None):
         if src_indices:
             assert all(x.step is None for x in src_indices)
-            shape = (
-                tuple(x.stop - x.start for x in src_indices)
-                + self.shape[len(src_indices) :]
-            )
+            shape = tuple(x.stop - x.start for x in src_indices) + self.shape[len(src_indices) :]
         else:
             shape = self.shape
 
@@ -233,14 +223,10 @@ class TorchDevice:
                 v_cache = self.allocate(shape, np.float32, pin_memory=False)
                 self.attention_compute_workspace.append((k_cache, v_cache))
         else:
-            self.compressed_device.init_attention_compute_workspace(
-                config, task, policy
-            )
+            self.compressed_device.init_attention_compute_workspace(config, task, policy)
 
     def next_attention_compute_workspace(self):
-        self.workspace_pt = (self.workspace_pt + 1) % len(
-            self.attention_compute_workspace
-        )
+        self.workspace_pt = (self.workspace_pt + 1) % len(self.attention_compute_workspace)
         return self.attention_compute_workspace[self.workspace_pt]
 
     def del_attention_compute_workspace(self):
@@ -255,19 +241,13 @@ class TorchDevice:
     def extend_attention_mask(self, attention_mask, donate):
         bs = attention_mask.shape[0]
         data = torch.concat(
-            (
-                attention_mask.data,
-                torch.ones((bs, 1), dtype=attention_mask.dtype, device=self.dev),
-            ),
-            dim=1,
+            (attention_mask.data, torch.ones((bs, 1), dtype=attention_mask.dtype, device=self.dev)), dim=1
         )
         if donate[0]:
             attention_mask.delete()
         return TorchTensor.create_from_torch(data, self)
 
-    def opt_input_embed(
-        self, inputs, attention_mask, w_token, w_pos, pad_token_id, donate
-    ):
+    def opt_input_embed(self, inputs, attention_mask, w_token, w_pos, pad_token_id, donate):
         # decompress weights
         if w_token.device.device_type == DeviceType.COMPRESSED:
             w_token = w_token.device.decompress(w_token)
@@ -295,9 +275,7 @@ class TorchDevice:
         data = token_embed + pos_embed
         return TorchTensor.create_from_torch(data, self)
 
-    def opt_output_embed(
-        self, inputs, w_ln, b_ln, w_token, donate, do_sample, temperature, evaluate
-    ):
+    def opt_output_embed(self, inputs, w_ln, b_ln, w_token, donate, do_sample, temperature, evaluate):
         # decompress weights
         if w_token.device.device_type == DeviceType.COMPRESSED:
             w_token = w_token.device.decompress(w_token)
@@ -322,7 +300,7 @@ class TorchDevice:
             ids = last_token_logits.argmax(dim=1, keepdim=True)
         return TorchTensor.create_from_torch(ids, self)
 
-    def init_cache_one_gpu_batch(self, config, task, policy):
+    def init_cache_one_gpu_batch(self, config, task, policy, j):
         num_head, hidden_size, prompt_len, gen_len, gpu_batch_size = (
             config.n_head,
             config.input_dim,
@@ -330,13 +308,10 @@ class TorchDevice:
             task.gen_len,
             policy.gpu_batch_size,
         )
-        shape = (
-            prompt_len + gen_len - 1,
-            gpu_batch_size * num_head,
-            hidden_size // num_head,
-        )
+        shape = (prompt_len + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
         # NOTE: disable pin_memory due to high memory overhead
         pin_memory = False
+        print(self.device_type)
         k_cache = self.allocate(shape, np.float16, pin_memory=pin_memory)
         v_cache = self.allocate(shape, np.float16, pin_memory=pin_memory)
         return k_cache, v_cache
@@ -501,24 +476,12 @@ class TorchDevice:
                 v = v.permute(1, 0, 2).reshape(b * n_head, src_s, head_dim)
 
                 if k.is_cuda:
-                    value = self._attention_value(
-                        q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim
-                    )
+                    value = self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
                 else:
                     q = q.float().cpu()
                     k, v = k.float(), v.float()
                     value = (
-                        self._attention_value(
-                            q,
-                            k,
-                            v,
-                            attention_mask.data,
-                            b,
-                            src_s,
-                            tgt_s,
-                            n_head,
-                            head_dim,
-                        )
+                        self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
                         .cuda()
                         .half()
                     )
@@ -531,33 +494,13 @@ class TorchDevice:
 
                 if k.is_cuda:
                     value = self._sparse_attention_value(
-                        q,
-                        k,
-                        v_new,
-                        v_cache,
-                        attention_mask.data,
-                        b,
-                        src_s,
-                        tgt_s,
-                        n_head,
-                        head_dim,
-                        attn_sparsity,
+                        q, k, v_new, v_cache, attention_mask.data, b, src_s, tgt_s, n_head, head_dim, attn_sparsity
                     )
                 else:
                     q = q.float().cpu()
                     value = (
                         self._sparse_attention_value(
-                            q,
-                            k,
-                            v_new,
-                            v_cache,
-                            attention_mask.data,
-                            b,
-                            src_s,
-                            tgt_s,
-                            n_head,
-                            head_dim,
-                            attn_sparsity,
+                            q, k, v_new, v_cache, attention_mask.data, b, src_s, tgt_s, n_head, head_dim, attn_sparsity
                         )
                         .cuda()
                         .half()
@@ -565,17 +508,7 @@ class TorchDevice:
         else:  # Mixed device attention
             assert attn_sparsity >= 1.0
             value = self._mixed_device_attention(
-                q,
-                k_cache,
-                v_cache,
-                k_new,
-                v_new,
-                attention_mask.data,
-                b,
-                src_s,
-                tgt_s,
-                n_head,
-                head_dim,
+                q, k_cache, v_cache, k_new, v_new, attention_mask.data, b, src_s, tgt_s, n_head, head_dim
             )
 
         # shape: (b, 1, h)
@@ -620,31 +553,14 @@ class TorchDevice:
         # shape: (b, n_head, 1, head_dim)
         return torch.bmm(attn_weights, v).view(b, n_head, tgt_s, head_dim)
 
-    def _sparse_attention_value(
-        self,
-        q,
-        k,
-        v_new,
-        v_cache,
-        mask,
-        b,
-        src_s,
-        tgt_s,
-        n_head,
-        head_dim,
-        attn_sparsity,
-    ):
+    def _sparse_attention_value(self, q, k, v_new, v_cache, mask, b, src_s, tgt_s, n_head, head_dim, attn_sparsity):
         # shape: (b * n_head, 1, s)
         attn_weights = self._attention_weights(q, k, mask, b, src_s, n_head)
         topk = int(attn_sparsity * (attn_weights.shape[2] - 1))
-        topk_weights, topk_indices = attn_weights[:, :, :-1].topk(
-            topk, dim=2, sorted=False
-        )
+        topk_weights, topk_indices = attn_weights[:, :, :-1].topk(topk, dim=2, sorted=False)
         topk_indices = topk_indices.view(b * n_head, topk).transpose(0, 1)
         # shape: (b * n_head, 1, topk+1)
-        attn_weights = torch.cat(
-            [topk_weights, attn_weights[:, :, -1].unsqueeze(-1)], dim=-1
-        )
+        attn_weights = torch.cat([topk_weights, attn_weights[:, :, -1].unsqueeze(-1)], dim=-1)
 
         if k.is_cuda:
             v_home = v_cache
@@ -668,9 +584,7 @@ class TorchDevice:
         # shape: (b * n_head, 1, head_dim)
         return torch.bmm(attn_weights, v).view(b, n_head, tgt_s, head_dim)
 
-    def _mixed_device_attention(
-        self, q, k_cache, v_cache, k_new, v_new, mask, b, src_s, tgt_s, n_head, head_dim
-    ):
+    def _mixed_device_attention(self, q, k_cache, v_cache, k_new, v_new, mask, b, src_s, tgt_s, n_head, head_dim):
         # The caches are stored on both gpu and cpu.
         # Compute attention on gpu for caches stored on gpu.
         # Compute attention on cpu for caches stored on cpu.
@@ -692,9 +606,7 @@ class TorchDevice:
         v_gpu = v_gpu.permute(1, 0, 2)
 
         mask_gpu = mask[:b_gpu].cuda()
-        value_gpu = self._attention_value(
-            q_gpu, k_gpu, v_gpu, mask_gpu, b_gpu, src_s, tgt_s, n_head, head_dim
-        )
+        value_gpu = self._attention_value(q_gpu, k_gpu, v_gpu, mask_gpu, b_gpu, src_s, tgt_s, n_head, head_dim)
 
         # Compute CPU Part
         b_cpu = b - b_gpu
@@ -710,9 +622,7 @@ class TorchDevice:
         v_cpu = v_cpu.permute(1, 0, 2)
 
         mask_cpu = mask[b_gpu:]
-        value_cpu = self._attention_value(
-            q_cpu, k_cpu, v_cpu, mask_cpu, b_cpu, src_s, tgt_s, n_head, head_dim
-        )
+        value_cpu = self._attention_value(q_cpu, k_cpu, v_cpu, mask_cpu, b_cpu, src_s, tgt_s, n_head, head_dim)
 
         value = torch.cat([value_gpu, value_cpu.cuda().half()], dim=0)
         return value
@@ -757,15 +667,10 @@ class TorchDevice:
         if output_file is not None:
             with open(output_file, "w") as f:
                 f.write(f"TorchDevice: {self.name}\n")
-                f.write(
-                    f"  cur_mem: {cur_mem/GB:.4f} GB, "
-                    f" peak_mem: {peak_mem/GB:.4f} GB\n"
-                )
+                f.write(f"  cur_mem: {cur_mem/GB:.4f} GB, " f" peak_mem: {peak_mem/GB:.4f} GB\n")
         else:
             print(f"TorchDevice: {self.name}")
-            print(
-                f"  cur_mem: {cur_mem/GB:.4f} GB, " f" peak_mem: {peak_mem/GB:.4f} GB"
-            )
+            print(f"  cur_mem: {cur_mem/GB:.4f} GB, " f" peak_mem: {peak_mem/GB:.4f} GB")
 
         return cur_mem, peak_mem
 
@@ -794,8 +699,7 @@ class TorchDisk:
         # Copy threads
         self.copy_queue = queue.Queue()
         self.copy_threads = [
-            threading.Thread(target=copy_worker_func, args=(self.copy_queue, cuda_id))
-            for _ in range(num_copy_threads)
+            threading.Thread(target=copy_worker_func, args=(self.copy_queue, cuda_id)) for _ in range(num_copy_threads)
         ]
         for t in self.copy_threads:
             t.start()
@@ -825,11 +729,7 @@ class TorchDisk:
             task.gen_len,
             policy.gpu_batch_size,
         )
-        shape = (
-            prompt_len + gen_len - 1,
-            gpu_batch_size * num_head,
-            hidden_size // num_head,
-        )
+        shape = (prompt_len + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
         k_cache = self.allocate(shape, np.float16)
         v_cache = self.allocate(shape, np.float16)
         return k_cache, v_cache
@@ -869,9 +769,7 @@ class TorchMixedDevice:
     def __init__(self, base_devices):
         self.name = "mixed"
         self.device_type = DeviceType.MIXED
-        self.base_devices = (
-            base_devices  # (TorchDevice("cuda:0"), TorchDevice("cpu"), TorchDisk)
-        )
+        self.base_devices = base_devices
 
     def allocate(self, shape, dtype, seg_lengths, pin_memory=None, name=None):
         assert sum(seg_lengths) == shape[SEG_DIM]
@@ -888,20 +786,12 @@ class TorchMixedDevice:
                 tensors.append(None)
             else:
                 seg_shape = shape[:SEG_DIM] + (seg_len,) + shape[SEG_DIM + 1 :]
-                tensors.append(
-                    devices[i].allocate(seg_shape, dtype, pin_memory=pin_memory)
-                )
+                tensors.append(devices[i].allocate(seg_shape, dtype, pin_memory=pin_memory))
 
-        return TorchTensor(
-            shape,
-            np_dtype_to_torch_dtype[dtype],
-            (tensors, seg_points),
-            self,
-            name=name,
-        )
+        return TorchTensor(shape, np_dtype_to_torch_dtype[dtype], (tensors, seg_points), self, name=name)
 
     def delete(self, tensor):
-        for x in tensor.data[0]:
+        for x in self.tensor.data[0]:
             if x:
                 x.delete()
 
@@ -913,42 +803,22 @@ class TorchMixedDevice:
             task.gen_len,
             policy.gpu_batch_size,
         )
-        shape = (
-            prompt_len + gen_len - 1,
-            gpu_batch_size * num_head,
-            hidden_size // num_head,
-        )
+        shape = (prompt_len + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
 
         # We have to round to a multiple of `num_head`
         if policy.cache_disk_percent == 0:
-            len_gpu = (
-                int(shape[SEG_DIM] * policy.cache_gpu_percent / 100)
-                // num_head
-                * num_head
-            )
+            len_gpu = int(shape[SEG_DIM] * policy.cache_gpu_percent / 100) // num_head * num_head
             len_cpu = shape[SEG_DIM] - len_gpu
             len_disk = 0
         else:
-            len_gpu = (
-                int(shape[SEG_DIM] * policy.cache_gpu_percent / 100)
-                // num_head
-                * num_head
-            )
-            len_cpu = (
-                int(shape[SEG_DIM] * policy.cache_cpu_percent / 100)
-                // num_head
-                * num_head
-            )
+            len_gpu = int(shape[SEG_DIM] * policy.cache_gpu_percent / 100) // num_head * num_head
+            len_cpu = int(shape[SEG_DIM] * policy.cache_cpu_percent / 100) // num_head * num_head
             len_disk = shape[SEG_DIM] - len_gpu - len_cpu
         lens = [len_gpu, len_cpu, len_disk]
 
         pin_memory = False
-        k_cache = self.allocate(
-            shape, np.float16, seg_lengths=lens, pin_memory=pin_memory
-        )
-        v_cache = self.allocate(
-            shape, np.float16, seg_lengths=lens, pin_memory=pin_memory
-        )
+        k_cache = self.allocate(shape, np.float16, seg_lengths=lens, pin_memory=pin_memory)
+        v_cache = self.allocate(shape, np.float16, seg_lengths=lens, pin_memory=pin_memory)
         return k_cache, v_cache
 
 
@@ -980,21 +850,16 @@ class TorchLink:
         return size / bandwidth
 
 
-def general_copy(
-    dst: TorchTensor,
-    dst_indices: Tuple[slice],
-    src: TorchTensor,
-    src_indices: Tuple[slice],
-):
+def general_copy(dst: TorchTensor, dst_indices: Tuple[slice], src: TorchTensor, src_indices: Tuple[slice]):
     """Launch a general asynchronous copy between two tensors.
     It is equivalent to `dst[dst_indices] = src[src_indices]` in numpy syntax.
     The copy is asynchronous. To wait for the copy to complete, you need to call
     >>> env.disk.synchronize()
     >>> torch.cuda.synchronize()
     """
-    if dst.device.device_type == DeviceType.MIXED or dst.device.device_type == DeviceType.CACHE_MIXED:
+    if dst.device.device_type == DeviceType.MIXED:
         # The tensor is on mixed devices, do recursive calls
-        assert src.device.device_type != DeviceType.MIXED and src.device.device_type != DeviceType.CACHE_MIXED
+        assert src.device.device_type != DeviceType.MIXED
         seg_points = dst.data[1]
 
         for i in range(len(dst.device.base_devices)):
@@ -1003,13 +868,11 @@ def general_copy(
             src_indices = src_indices or tuple(slice(0, x) for x in src.shape)
             dst_indices = dst_indices or tuple(slice(0, x) for x in dst.shape)
             tmp_src_indices = cut_indices(src_indices, seg_points[i], seg_points[i + 1])
-            tmp_dst_indices = cut_indices(
-                dst_indices, seg_points[i], seg_points[i + 1], base=seg_points[i]
-            )
+            tmp_dst_indices = cut_indices(dst_indices, seg_points[i], seg_points[i + 1], base=seg_points[i])
             general_copy(dst.data[0][i], tmp_dst_indices, src, tmp_src_indices)
-    elif src.device.device_type == DeviceType.MIXED or src.device.device_type == DeviceType.CACHE_MIXED:
+    elif src.device.device_type == DeviceType.MIXED:
         # The tensor is on mixed devices, do recursive calls
-        assert dst.device.device_type != DeviceType.MIXED and dst.device.device_type != DeviceType.CACHE_MIXED
+        assert dst.device.device_type != DeviceType.MIXED
         seg_points = src.data[1]
 
         for i in range(len(src.device.base_devices)):
@@ -1017,15 +880,10 @@ def general_copy(
                 continue
             src_indices = src_indices or tuple(slice(0, x) for x in src.shape)
             dst_indices = dst_indices or tuple(slice(0, x) for x in dst.shape)
-            tmp_src_indices = cut_indices(
-                src_indices, seg_points[i], seg_points[i + 1], base=seg_points[i]
-            )
+            tmp_src_indices = cut_indices(src_indices, seg_points[i], seg_points[i + 1], base=seg_points[i])
             tmp_dst_indices = cut_indices(dst_indices, seg_points[i], seg_points[i + 1])
             general_copy(dst, tmp_dst_indices, src.data[0][i], tmp_src_indices)
-    elif (
-        src.device.device_type == DeviceType.COMPRESSED
-        or dst.device.device_type == DeviceType.COMPRESSED
-    ):
+    elif src.device.device_type == DeviceType.COMPRESSED or dst.device.device_type == DeviceType.COMPRESSED:
         # The tensor is compressed, do recursive calls
         general_copy_compressed(dst, dst_indices, src, src_indices)
     elif src.device.device_type == DeviceType.DISK:
@@ -1064,9 +922,7 @@ def cut_indices(indices, start, stop, base=0):
     assert all(x.step is None for x in indices)
     seg = indices[SEG_DIM]
     return (
-        indices[:SEG_DIM]
-        + (slice(max(seg.start, start) - base, min(seg.stop, stop) - base),)
-        + indices[SEG_DIM + 1 :]
+        indices[:SEG_DIM] + (slice(max(seg.start, start) - base, min(seg.stop, stop) - base),) + indices[SEG_DIM + 1 :]
     )
 
 
@@ -1100,10 +956,7 @@ def copy_worker_func(queue, cuda_id):
             src_data = map_to_torch_tensor(src, src_indices)
             dst_data = map_to_torch_tensor(dst, dst_indices)
 
-            if (
-                src.device.device_type == DeviceType.CUDA
-                or dst.device.device_type == DeviceType.CUDA
-            ):
+            if src.device.device_type == DeviceType.CUDA or dst.device.device_type == DeviceType.CUDA:
                 # Use a pinned cpu buffer as a relay
                 size = np.prod(src_data.shape)
                 tmp_cpu_buf = cpu_buf[:size].view(src_data.shape)

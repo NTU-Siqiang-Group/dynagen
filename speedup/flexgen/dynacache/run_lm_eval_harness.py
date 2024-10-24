@@ -20,7 +20,7 @@ def get_inputs(tokenizer, prompt, prompt_len = None):
 def init_flexgen(args, tokenizer):
     with open(args.warmup_input_path, "r") as f:
         prompt = [f.read()]
-    warmup_inputs = get_inputs(tokenizer, prompt, 32)
+    warmup_inputs = get_inputs(tokenizer, prompt, 2048)
 
     gpu = TorchDevice("cuda:0")
     cpu = TorchDevice("cpu")
@@ -49,16 +49,10 @@ def init_flexgen(args, tokenizer):
 def run_flexgen(model, tokenizer, prompt):
     # Task and policy
     inputs = get_inputs(tokenizer, prompt)
-    print("len(inputs):", len(inputs))
 
     timers("generate").reset()
-    logits = model.generate(
-        inputs,
-        max_new_tokens=1,
-        cut_gen_len=1,
-        evaluate=True
-    )
-
+    logits = model.generate(inputs, max_new_tokens=1, cut_gen_len=1, evaluate=True)
+    
     return logits
 
 if __name__ == "__main__":

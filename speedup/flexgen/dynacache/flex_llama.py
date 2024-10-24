@@ -4,17 +4,18 @@ python3 -m flexgen.flex_llama --model meta-llama/Llama-2-7b-chat-hf --gpu-batch-
 """
 
 import os
-import numpy as np
 import torch
 import argparse
-from typing import List, Optional, Union
+import numpy as np
 from tqdm import tqdm
+from typing import Union
 from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
-from flexgen.pytorch_backend import DeviceType, LlamaTorchDevice, TorchDisk, TorchMixedDevice, fix_recursive_import, general_copy
+from flexgen.pytorch_backend import LlamaTorchDevice, TorchDisk, TorchMixedDevice, fix_recursive_import
 from flexgen.flex_opt import (
     Policy,
+    init_weight_list,
     InputEmbed,
     OutputEmbed,
     SelfAttention,
@@ -27,18 +28,13 @@ from flexgen.timer import timers
 from flexgen.utils import (
     ExecutionEnv,
     GB,
-    Task,
     ValueHolder,
     array_1d,
     array_2d,
-    array_3d,
     str2bool,
     project_decode_latency,
     write_benchmark_log,
 )
-
-from dynagen.weight_tensor_manager import TorchCPUWeightTensorManager
-from dynagen.cache_tensor_manager import TorchCacheTensorDevice
 
 fix_recursive_import()
 
@@ -49,28 +45,22 @@ class LlamaInputEmbed(InputEmbed):
     def __init__(self, config, env, policy):
         super().__init__(config, env, policy)
 
-    def get_weight_specs(self, path):
+    def init_weight(self, weight_home, path):
         v, h, dtype = (self.config.vocab_size, self.config.input_dim, self.config.dtype)
         path = os.path.join(path, "")
-        return [
+        weight_specs = [
             # w_token
             ((v, h), dtype, path + "embed_tokens.weight"),
         ]
+        weights = init_weight_list(weight_specs, self.policy, self.env)
+
+        weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         (w_token,) = weight_home.val
         if k == 0:
             dst = self.weight_load_dst
             weight_read_buf.store((w_token.smart_copy(dst),))
-
-        weight_stats = {}
-        for weight in (w_token,):
-            if weight.device.name in weight_stats:
-                weight_stats[weight.device.name] += weight.bytes
-            else:
-                weight_stats[weight.device.name] = weight.bytes
-
-        return weight_stats
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         # Compute input embedding
@@ -87,20 +77,26 @@ class LlamaInputEmbed(InputEmbed):
         h = self.compute.llama_input_embed(h, mask, w_token, self.config.pad_token_id, donate)
         hidden.val = h
 
+    def set_cache(self, cache_home, i, j):
+        pass
+
 
 class LlamaOutputEmbed(OutputEmbed):
     def __init__(self, config, env, policy):
         super().__init__(config, env, policy)
 
-    def get_weight_specs(self, path):
+    def init_weight(self, weight_home, path):
         v, h, dtype = (self.config.vocab_size, self.config.input_dim, self.config.dtype)
         path = os.path.join(path, "")
-        return [
+        weight_specs = [
             # w_ln
             ((h,), dtype, path + "norm.weight"),
             # w_token
             ((v, h), dtype, path + "lm_head.weight"),
         ]
+        weights = init_weight_list(weight_specs, self.policy, self.env)
+
+        weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, w_token = weight_home.val
@@ -108,15 +104,6 @@ class LlamaOutputEmbed(OutputEmbed):
             dst1 = self.weight_load_dst
             dst2 = self.compute
             weight_read_buf.store((w_ln.smart_copy(dst2), w_token.smart_copy(dst1)))
-
-        weight_stats = {}
-        for weight in (w_ln, w_token):
-            if weight.device.name in weight_stats:
-                weight_stats[weight.device.name] += weight.bytes
-            else:
-                weight_stats[weight.device.name] = weight.bytes
-
-        return weight_stats
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 3
@@ -134,18 +121,21 @@ class LlamaOutputEmbed(OutputEmbed):
             w_token,
             self.config.rms_norm_eps,
             donate,
-            do_sample=True,
+            do_sample=False,
             temperature=0.5,
             evaluate=self.task.evaluate,
         )
         hidden.val = h
+
+    def set_cache(self, cache_home, i, j):
+        pass
 
 
 class LlamaSelfAttention(SelfAttention):
     def __init__(self, config, env, policy, layer_id):
         super().__init__(config, env, policy, layer_id)
 
-    def get_weight_specs(self, path):
+    def init_weight(self, weight_home, path):
         h, n_head, n_kv_head, dtype = (
             self.config.input_dim,
             self.config.n_head,
@@ -154,7 +144,7 @@ class LlamaSelfAttention(SelfAttention):
         )
         head_dim = h // n_head
         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
-        return [
+        weight_specs = [
             # w_ln
             ((h,), dtype, path + "input_layernorm.weight"),
             # w_q
@@ -168,6 +158,8 @@ class LlamaSelfAttention(SelfAttention):
             # w_o
             ((n_head * head_dim, h), dtype, path + "self_attn.o_proj.weight"),
         ]
+        weights = init_weight_list(weight_specs, self.policy, self.env)
+        weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, w_q, w_k, w_v, w_re, w_o = weight_home.val
@@ -184,109 +176,6 @@ class LlamaSelfAttention(SelfAttention):
                     w_o.smart_copy(dst1),
                 )
             )
-
-        weight_stats = {}
-        for weight in (w_ln, w_q, w_k, w_v, w_re, w_o):
-            if weight.device.name in weight_stats:
-                weight_stats[weight.device.name] += weight.bytes
-            else:
-                weight_stats[weight.device.name] = weight.bytes
-
-        return weight_stats
-
-    def load_cache(self, cache_home, cache_read_buf, i):
-        if i == 0:  # prefill, no cache
-            return
-
-        k_home, v_home = cache_home.val
-
-        # Pick code path
-        if self.policy.compress_cache:
-            path = 0
-            dst = self.attention_compute.compressed_device
-        else:
-            if self.policy.cpu_cache_compute:
-                if k_home.device.device_type == DeviceType.MIXED and k_home.data[0][0] is not None:
-                    path = 2
-                else:
-                    path = 1
-            else:
-                path = 0
-            dst = self.attention_compute
-
-        if path == 0:  # Direct copy
-            # shape: (s, b * n_head, head_dim)
-            indices = (slice(0, self.task.prompt_len + i), slice(0, k_home.shape[1]))
-
-            if self.policy.attn_sparsity >= 1.0:
-                cache_read_buf.store(
-                    (
-                        k_home.smart_copy(dst, indices),
-                        v_home.smart_copy(dst, indices),
-                    )
-                )
-            else:
-                cache_read_buf.store(
-                    (
-                        k_home.smart_copy(dst, indices),
-                        (v_home, False),
-                    )
-                )
-        elif path == 1:  # Copy to CPU temporary workspace
-            # shape: (s, b * n_head, head_dim)
-            k_buf, v_buf = dst.next_attention_compute_workspace()
-            indices = (slice(0, self.task.prompt_len + i - 1), slice(0, k_home.shape[1]))
-            general_copy(k_buf, indices, k_home, indices)
-
-            if self.policy.attn_sparsity >= 1.0:
-                general_copy(v_buf, indices, v_home, indices)
-                cache_read_buf.store(((k_buf, False), (v_buf, False)))
-            else:
-                cache_read_buf.store(((k_buf, False), ((v_home, v_buf), False)))
-        elif path == 2:  # Copy to both GPU and CPU
-            # The caches are stored on both GPU and other devices.
-            # Compute attention on gpu for caches stored on gpu.
-            # Compute attention on cpu for caches stored on cpu/disk.
-            gpu_k_buf = k_home.data[0][0]
-            gpu_v_buf = v_home.data[0][0]
-
-            # shape: (s, b * n_head, head_dim)
-            k_buf, v_buf = dst.next_attention_compute_workspace()
-            indices = (slice(0, self.task.prompt_len + i - 1), slice(gpu_k_buf.shape[1], k_home.shape[1]))
-            general_copy(k_buf, indices, k_home, indices)
-            general_copy(v_buf, indices, v_home, indices)
-            cache_read_buf.store(
-                (
-                    (
-                        (
-                            gpu_k_buf,
-                            k_buf,
-                        ),
-                        False,
-                    ),
-                    (
-                        (
-                            gpu_v_buf,
-                            v_buf,
-                        ),
-                        False,
-                    ),
-                )
-            )
-            assert self.policy.attn_sparsity >= 1.0
-        else:
-            raise ValueError(f"Invalid path: {path}")
-
-    def init_cache_one_gpu_batch(self, cache_home):
-        device = self.env.cache_mixed
-
-        # TODO: support compressed cache
-        if self.policy.compress_cache:
-            assert device.device_type != DeviceType.MIXED
-            device = device.compressed_device
-
-        cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
-        cache_home.store(cache)
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         n_head = self.config.n_head
@@ -358,15 +247,25 @@ class LlamaSelfAttention(SelfAttention):
 
         hidden.val = h
 
+    def set_cache(self, cache_home, i, j):
+        if i == self.task.gen_len - 1:  # last token, no need to set cache
+            return
+
+        k_home, v_home = cache_home.val
+        device = self.env.gpu if self.policy.layer_cache_allocate[j] == True else self.env.cpu
+        print(f"set_cache: i={i}, j={j}, device={device}")
+        k_home.move(device)
+        v_home.move(device)
+
 
 class LlamaMLP(MLP):
     def __init__(self, config, env, policy, layer_id):
         super().__init__(config, env, policy, layer_id)
 
-    def get_weight_specs(self, path):
+    def init_weight(self, weight_home, path):
         h, intermediate, dtype = (self.config.input_dim, self.config.intermediate_size, self.config.dtype)
         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
-        return [
+        weight_specs = [
             # w_ln
             ((h,), dtype, path + "post_attention_layernorm.weight"),
             # w_g
@@ -376,6 +275,8 @@ class LlamaMLP(MLP):
             # w_d
             ((h, intermediate), dtype, path + "mlp.down_proj.weight"),
         ]
+        weights = init_weight_list(weight_specs, self.policy, self.env)
+        weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, w_g, w_u, w_d = weight_home.val
@@ -385,15 +286,6 @@ class LlamaMLP(MLP):
             weight_read_buf.store(
                 (w_ln.smart_copy(dst2), w_g.smart_copy(dst1), w_u.smart_copy(dst1), w_d.smart_copy(dst1))
             )
-
-        weight_stats = {}
-        for weight in (w_ln, w_g, w_u, w_d):
-            if weight.device.name in weight_stats:
-                weight_stats[weight.device.name] += weight.bytes
-            else:
-                weight_stats[weight.device.name] = weight.bytes
-
-        return weight_stats
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 5
@@ -407,6 +299,9 @@ class LlamaMLP(MLP):
 
         h = self.compute.llama_mlp(h, w_ln, w_g, w_u, w_d, self.config.rms_norm_eps, donate)
         hidden.val = h
+
+    def set_cache(self, cache_home, i, j):
+        pass
 
 
 class LlamaTransformerLayer(TransformerLayer):
@@ -429,10 +324,12 @@ class LlamaLM(OptLM):
 
         layers = []
         layers.append(LlamaInputEmbed(self.config, self.env, self.policy))
+        attn_layers = 0
         for i in range(self.config.num_hidden_layers):
             if policy.sep_layer:
                 layers.append(LlamaSelfAttention(self.config, self.env, self.policy, i))
                 layers.append(LlamaMLP(self.config, self.env, self.policy, i))
+                attn_layers += 1
             else:
                 layers.append(LlamaTransformerLayer(self.config, self.env, self.policy, i))
         layers.append(LlamaOutputEmbed(self.config, self.env, self.policy))
@@ -468,14 +365,18 @@ class LlamaLM(OptLM):
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
 
         self.task = None
-        self.weight_manager = TorchCPUWeightTensorManager(self.env)
         self.init_all_weights()
 
-        self.w_percent = {}
-        self.compute = self.env.gpu
-        self.weight_load_dst = (
-            self.compute.compressed_device if policy.compress_weight else self.compute
-        )
+        self.policy.layer_cache_allocate = [False] * num_layers
+        self.policy.layer_cache_budget = int(self.policy.cache_cpu_percent * attn_layers / 100)
+        budget = self.policy.layer_cache_budget
+        for i, allocate in enumerate(self.policy.layer_cache_allocate):
+            if isinstance(self.layers[i], LlamaSelfAttention):
+                if budget > 0:
+                    self.policy.layer_cache_allocate[i] = True
+                    budget -= 1
+                else:
+                    break
 
     def init_weight(self, j):
         expanded_path = os.path.abspath(os.path.expanduser(os.path.join(self.path, f"{self.config.name}-np")))
@@ -483,138 +384,26 @@ class LlamaLM(OptLM):
         if not os.path.exists(check_path) and DUMMY_WEIGHT not in check_path:
             download_llama_weights(self.config.name, self.config.org, self.path, self.config.hf_token)
 
-        self.layers[j].init_weight(self.weight_manager, self.weight_home[j], expanded_path)
+        self.layers[j].init_weight(self.weight_home[j], expanded_path)
 
-    def generate(
-        self,
-        inputs: Union[np.array, List[List[int]]],
-        max_new_tokens: int = 32,
-        do_sample: bool = False,
-        temperature: float = 1.0,
-        stop: Optional[int] = None,
-        debug_mode: Optional[str] = None,
-        cut_gen_len: Optional[int] = None,
-        verbose: int = 0,
-        warmup: bool = False,
-        evaluate: bool = False,
-    ):
-        if evaluate:
-            assert max_new_tokens == 1 and self.num_gpu_batches == 1 and self.policy.gpu_batch_size == 1
-
-        task = Task(
-            inputs=inputs,
-            prompt_len=len(inputs[0]),
-            gen_len=max_new_tokens,
-            cut_gen_len=cut_gen_len,
-            do_sample=do_sample,
-            temperature=temperature,
-            stop=stop,
-            evaluate=evaluate,
-        )
-        num_layers = self.num_layers
-        num_gpu_batches = self.num_gpu_batches
-        gpu_batch_size = self.policy.gpu_batch_size
-        overlap = self.policy.overlap
-        prompt_len, gen_len = task.prompt_len, task.gen_len
-        self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
-        self.warmup = warmup
-
-        # Output token ids
-        self.output_ids = np.full((len(task.inputs), prompt_len + gen_len), self.config.pad_token_id, dtype=np.int32)
-        self.stopped = np.zeros((len(task.inputs), 1), dtype=bool)
-        self.output_ids[:, :prompt_len] = np.asarray(task.inputs)
-        # assert gpu_batch_size * num_gpu_batches == len(task.inputs)
-
-        # Intermediate tensors
-        # The following buffers store values used
-        # for the i-th token, j-th layer, k-th gpu batch.
-        num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
-        for j in range(num_layers):
-            for k in range(num_gpu_batches):
-                self.cache_home[j][k].clear()
-                self.cache_read_buf[j][k].clear()
-                self.cache_write_buf[j][k].clear()
-        for j in range(num_layers):
-            self.weight_read_buf[j].clear()
-        for k in range(num_gpu_batches):
-            self.attention_mask[k].clear()
-        self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
-
-        # Init cache
-        self.set_task(task)
-        for j in range(num_layers):
-            for k in range(num_gpu_batches):
-                self.init_cache(j, k)
-        if self.policy.cpu_cache_compute:
-            self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
-
-        # Generate
-        # self.generation_loop_normal(evaluate)
-        if num_gpu_batches == 1:
-            self.generation_loop_overlap_single_batch(evaluate)
-        else:
-            self.generation_loop_overlap_multi_batch()
-
-        for j in range(num_layers):
-            for k in range(num_gpu_batches):
-                self.delete_cache(j, k)
-        if self.policy.cpu_cache_compute:
-            self.env.cpu.del_attention_compute_workspace()
-
-        if evaluate:
-            return self.hidden[0][-1][0].val.data.detach().cpu()
-
-        return self.output_ids
-
-    def compute_layer(self, i, j, k):
-        # Update the hidden in place
-        # Clear the weight_read_buf if it is the last gpu batch
-        # Clear the cache_read_buf
-        # Run layer computation
-        self.layers[j].forward(
-            self.hidden[i][j][k],
-            self.cache_read_buf[j][k],
-            self.weight_read_buf[j],
-            self.attention_mask[k],
-            self.cache_write_buf[j][k],
-            i,
-            k,
-        )
-
-    def load_weight(self, i, j, k, overlap=True):
+    def set_cache(self, i, j, k):
         # Handle corner cases
-        if j == self.num_layers:
-            j = 0
-            i += 1
-            if i == self.execute_gen_len:
+        if k == -1:
+            k = self.policy.num_gpu_batches - 1
+            j -= 1
+        if j == -1:
+            j = self.num_layers - 1
+            i -= 1
+            if i == -1:
                 return
+        if i == self.task.gen_len - 1:  # last token, no need to set cache
+            self.cache_write_buf[j][k].clear()
+            return
 
-        # Load from weight_home to weight_read_buf
-        if overlap:
-            with torch.cuda.stream(self.load_weight_stream):
-                self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
-        else:
-            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
-
-    # def set_weight(self, i, j):
-    #     # Handle corner cases
-    #     if j == self.num_layers:
-    #         j = 0
-    #         i += 1
-    #         if i == self.execute_gen_len:
-    #             return
-
-    #     expanded_path = os.path.abspath(os.path.expanduser(os.path.join(self.path, f"{self.config.name}-np")))
-    #     self.layers[j].set_weight(self.weight_manager, self.weight_home[j], self.weight_read_buf[j], expanded_path)
+        self.layers[j].set_cache(self.cache_home[j][k], i, j)
 
     def generation_loop_overlap_single_batch(self, evaluate):
         # Prologue
-        # batch_sizes = [2, 2, 2, 2, 2]
-        cache_gpu_percents = [100, 100, 100, 100, 100]
-        w_gpu_percents = [20, 40, 30, 40, 30]
-        policy = self.policy
-
-        self.set_weight(0, 0)
         self.load_weight(0, 0, 0)
         self.sync()
 
@@ -623,7 +412,6 @@ class LlamaLM(OptLM):
             timers("generate").start()
             self.update_attention_mask(i, 0)
             for j in range(self.num_layers):
-                self.set_weight(i, j + 1)
                 self.load_weight(i, j + 1, 0)
                 self.load_cache(i, j + 1, 0)
                 self.load_hidden(i, j, 0)
@@ -632,63 +420,13 @@ class LlamaLM(OptLM):
                     self.sync()
                     break
                 self.store_cache(i, j - 1, 0)
-                self.set_cache(i, j - 1, 0)
                 self.store_hidden(i, j, 0)
                 self.sync()
-            if i < len(cache_gpu_percents) and i < len(cache_gpu_percents):
-                # policy.gpu_batch_size = batch_sizes[i]
-                policy.cache_gpu_percent = cache_gpu_percents[i]
-                policy.cache_cpu_percent = 100 - cache_gpu_percents[i]
-                policy.w_gpu_percent = w_gpu_percents[i]
-                policy.w_cpu_percent = 100 - w_gpu_percents[i]
-                print("policy:", policy)
-                self.set_policy(policy)
+                self.set_cache(i, j, 0)
             timers("generate").stop()
 
             if self.task.stop and np.all(self.stopped):
                 break
-
-    def generation_loop_overlap_multi_batch(self):
-        # Prologue
-        # batch_sizes = [2, 2, 2, 2, 2]
-        cache_gpu_percents = [100, 100, 100, 100, 100]
-        w_gpu_percents = [20, 40, 30, 40, 30]
-        policy = self.policy
-
-        self.set_weight(0, 0)
-        for k in range(self.num_gpu_batches):
-            self.load_weight(0, 0, k)
-        self.load_hidden(0, 0, 0)
-        self.sync()
-
-        # Generate
-        for i in tqdm(range(self.execute_gen_len)):
-            timers("generate").start()
-            for k in range(self.num_gpu_batches):
-                self.update_attention_mask(i, k)
-            for j in range(self.num_layers):
-                for k in range(self.num_gpu_batches):
-                    self.set_weight(i, j + 1)
-                    self.load_weight(i, j + 1, k)
-                    self.load_cache(i, j, k + 1)
-                    self.store_hidden(i, j, k - 1)
-                    self.load_hidden(i, j, k + 1)
-                    self.compute_layer(i, j, k)
-                    self.store_cache(i, j, k - 1)
-                    self.set_cache(i, j, k - 1)
-                    self.sync()
-            if i < self.execute_gen_len and i < len(cache_gpu_percents):
-                # policy.gpu_batch_size = batch_sizes[i]
-                policy.cache_gpu_percent = cache_gpu_percents[i]
-                policy.cache_cpu_percent = 100 - cache_gpu_percents[i]
-                policy.w_gpu_percent = w_gpu_percents[i]
-                policy.w_cpu_percent = 100 - w_gpu_percents[i]
-                print("policy:", policy)
-                self.set_policy(policy)
-            timers("generate").stop()
-
-        # Epilogue
-        self.store_hidden(self.execute_gen_len - 1, self.num_layers - 1, self.num_gpu_batches - 1)
 
 
 def get_test_inputs(prompt_len, num_prompts, tokenizer):
@@ -711,7 +449,7 @@ def run_flexgen(args):
     gpu = LlamaTorchDevice("cuda:0")
     cpu = LlamaTorchDevice("cpu")
     disk = TorchDisk(args.offload_dir)
-    env = ExecutionEnv(gpu=gpu, cpu=cpu, disk=disk, mixed=TorchMixedDevice([gpu, cpu, disk]), cache_mixed=TorchCacheTensorDevice([gpu, cpu, disk]))
+    env = ExecutionEnv(gpu=gpu, cpu=cpu, disk=disk, mixed=TorchMixedDevice([gpu, cpu, disk]))
 
     policy = Policy(
         args.gpu_batch_size,
@@ -731,6 +469,8 @@ def run_flexgen(args):
         CompressionConfig(num_bits=4, group_size=64, group_dim=0, symmetric=False),
         args.compress_cache,
         CompressionConfig(num_bits=4, group_size=64, group_dim=2, symmetric=False),
+        None,
+        None,
     )
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
