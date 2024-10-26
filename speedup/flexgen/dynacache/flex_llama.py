@@ -396,7 +396,7 @@ class LlamaLM(OptLM):
         self.policy.layer_cache_allocate = [False] * len(self.policy.layer_cache_allocate)
         start_pos = self.attn_layer.index(j)
         allocated = 0
-        while allocated < budget: 
+        while allocated < budget:
             current_idx = start_pos % len(self.attn_layer)
             layer_idx = self.attn_layer[current_idx]
             self.policy.layer_cache_allocate[layer_idx] = True
@@ -436,18 +436,19 @@ class LlamaLM(OptLM):
                 self.load_cache(i, j + 1, 0)
                 self.load_hidden(i, j, 0)
                 self.compute_layer(i, j, 0)
-                # if evaluate and j == self.num_layers - 1:
-                #     self.sync()
-                #     break
+                if evaluate and j == self.num_layers - 1:
+                    self.sync()
+                    break
                 self.store_cache(i, j - 1, 0)
                 self.store_hidden(i, j, 0)
-                # self.sync()
+                self.sync()
                 if (
                     j in self.attn_layer
                     and self.attn_layer.index(j) % int(self.policy.layer_cache_budget / 2) == 0
                     and not (j == 1 and i == 0)
                     and not warmup
-                    and True   
+                    and True
+                    and i < 128
                 ):
                     self.set_policy_cache(j)
                     for l in self.attn_layer:
