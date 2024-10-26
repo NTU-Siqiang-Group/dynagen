@@ -1,6 +1,6 @@
 FLEXGEN_PATH=$PWD/../flexgen
 # for SCHEME in "original" "dynacache" "dynagen"
-for SCHEME in "original"
+for SCHEME in "dynacache"
 do
   rm $FLEXGEN_PATH/flexgen/flex_llama.py
   rm $FLEXGEN_PATH/flexgen/flex_opt.py

@@ -251,14 +251,14 @@ class LlamaSelfAttention(SelfAttention):
         if i == self.task.gen_len - 1:  # last token, no need to set cache
             return
 
-        device = self.env.gpu if policy.layer_cache_allocate[j] == True else self.env.cpu
+        dst = self.env.gpu if policy.layer_cache_allocate[j] == True else self.env.cpu
         k_home, _ = cache_home.val
         # print(f"set_cache: i={i}, j={j}, device={device}")
         # print(k_home.device)
-        if device != k_home.device:
+        if dst != k_home.device:
             k_home, v_home = cache_home.pop()
-            k_home = k_home.move(device)
-            v_home = v_home.move(device)
+            k_home = k_home.move(dst)
+            v_home = v_home.move(dst)
             cache_home.store((k_home, v_home))
 
 
@@ -353,6 +353,7 @@ class LlamaLM(OptLM):
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
+        self.set_cache_stream = torch.cuda.Stream()
 
         # Intermediate tensors
         # The following buffers store values used
@@ -420,7 +421,8 @@ class LlamaLM(OptLM):
             self.cache_write_buf[j][k].clear()
             return
 
-        self.layers[j].set_cache(self.cache_home[j][k], self.policy, i, j)
+        with torch.cuda.stream(self.set_cache_stream):
+            self.layers[j].set_cache(self.cache_home[j][k], self.policy, i, j)
 
     def generation_loop_overlap_single_batch(self, evaluate, warmup=False):
         # Prologue
@@ -447,8 +449,8 @@ class LlamaLM(OptLM):
                     and self.attn_layer.index(j) % int(self.policy.layer_cache_budget / 2) == 0
                     and not (j == 1 and i == 0)
                     and not warmup
-                    and True
-                    and i < 128
+                    and False
+                    and i < 32
                 ):
                     self.set_policy_cache(j)
                     for l in self.attn_layer:
