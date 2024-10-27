@@ -77,9 +77,6 @@ class LlamaInputEmbed(InputEmbed):
         h = self.compute.llama_input_embed(h, mask, w_token, self.config.pad_token_id, donate)
         hidden.val = h
 
-    def set_cache(self, cache_home, policy, i, j):
-        pass
-
 
 class LlamaOutputEmbed(OutputEmbed):
     def __init__(self, config, env, policy):
@@ -121,14 +118,11 @@ class LlamaOutputEmbed(OutputEmbed):
             w_token,
             self.config.rms_norm_eps,
             donate,
-            do_sample=False,
+            do_sample=True,
             temperature=0.5,
             evaluate=self.task.evaluate,
         )
         hidden.val = h
-
-    def set_cache(self, cache_home, policy, i, j):
-        pass
 
 
 class LlamaSelfAttention(SelfAttention):
@@ -247,20 +241,6 @@ class LlamaSelfAttention(SelfAttention):
 
         hidden.val = h
 
-    def set_cache(self, cache_home, policy, i, j):
-        if i == self.task.gen_len - 1:  # last token, no need to set cache
-            return
-
-        dst = self.env.gpu if policy.layer_cache_allocate[j] == True else self.env.cpu
-        k_home, _ = cache_home.val
-        # print(f"set_cache: i={i}, j={j}, device={device}")
-        # print(k_home.device)
-        if dst != k_home.device:
-            k_home, v_home = cache_home.pop()
-            k_home = k_home.move(dst)
-            v_home = v_home.move(dst)
-            cache_home.store((k_home, v_home))
-
 
 class LlamaMLP(MLP):
     def __init__(self, config, env, policy, layer_id):
@@ -303,9 +283,6 @@ class LlamaMLP(MLP):
 
         h = self.compute.llama_mlp(h, w_ln, w_g, w_u, w_d, self.config.rms_norm_eps, donate)
         hidden.val = h
-
-    def set_cache(self, cache_home, policy, i, j):
-        pass
 
 
 class LlamaTransformerLayer(TransformerLayer):
@@ -353,7 +330,6 @@ class LlamaLM(OptLM):
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
-        self.set_cache_stream = torch.cuda.Stream()
 
         # Intermediate tensors
         # The following buffers store values used
@@ -372,18 +348,6 @@ class LlamaLM(OptLM):
         self.task = None
         self.init_all_weights()
 
-        self.policy.layer_cache_allocate = [False] * num_layers
-        self.policy.layer_cache_budget = int(self.policy.cache_gpu_percent * len(self.attn_layer) / 100)
-        budget = self.policy.layer_cache_budget
-        for i, allocate in enumerate(self.policy.layer_cache_allocate):
-            if i in self.attn_layer:
-                if budget > 0:
-                    self.policy.layer_cache_allocate[i] = True
-                    budget -= 1
-                else:
-                    break
-        true_indices = [i for i, value in enumerate(self.policy.layer_cache_allocate) if value]
-
     def init_weight(self, j):
         expanded_path = os.path.abspath(os.path.expanduser(os.path.join(self.path, f"{self.config.name}-np")))
         check_path = os.path.join(expanded_path, "embed_tokens.weight")
@@ -392,50 +356,33 @@ class LlamaLM(OptLM):
 
         self.layers[j].init_weight(self.weight_home[j], expanded_path)
 
-    def set_policy_cache(self, j):
-        budget = self.policy.layer_cache_budget
-        self.policy.layer_cache_allocate = [False] * len(self.policy.layer_cache_allocate)
-        start_pos = self.attn_layer.index(j)
-        allocated = 0
-        while allocated < budget:
-            current_idx = start_pos % len(self.attn_layer)
-            layer_idx = self.attn_layer[current_idx]
-            self.policy.layer_cache_allocate[layer_idx] = True
-            allocated += 1
-            start_pos += 1
-
-        # true_indices = [i for i, value in enumerate(self.policy.layer_cache_allocate) if value]
-        # print(f"Cache allocated at layers: {true_indices}")
-
-    def set_cache(self, i, j, k):
-        # Handle corner cases
-        if k == -1:
-            k = self.policy.num_gpu_batches - 1
-            j -= 1
-        if j == -1:
-            j = self.num_layers - 1
-            i -= 1
-            if i == -1:
-                return
-        if i == self.task.gen_len - 1:  # last token, no need to set cache
-            self.cache_write_buf[j][k].clear()
-            return
-
-        with torch.cuda.stream(self.set_cache_stream):
-            self.layers[j].set_cache(self.cache_home[j][k], self.policy, i, j)
-
-    def generation_loop_overlap_single_batch(self, evaluate, warmup=False):
+    def generation_loop_overlap_single_batch(self, evaluate):
         # Prologue
         self.load_weight(0, 0, 0)
         self.sync()
 
         # Generate
+        bound = 1
+        step = 8
         for i in tqdm(range(self.execute_gen_len)):
             timers("generate").start()
             self.update_attention_mask(i, 0)
+            if i < bound:
+                for l in range(step):
+                    self.load_cache(i, self.attn_layer[l], 0, overlap=True)
             for j in range(self.num_layers):
+                # print(i, j)
                 self.load_weight(i, j + 1, 0)
-                self.load_cache(i, j + 1, 0)
+                if i < bound:
+                    if (
+                        j in self.attn_layer
+                        and self.attn_layer.index(j) % step == 0
+                        and (self.attn_layer.index(j) + step) < len(self.attn_layer) - 1
+                    ):
+                        for l in range(step):
+                            self.load_cache(i, self.attn_layer[(self.attn_layer.index(j) + l + step)], 0, overlap=True)
+                else:
+                    self.load_cache(i, j + 1, 0)
                 self.load_hidden(i, j, 0)
                 self.compute_layer(i, j, 0)
                 if evaluate and j == self.num_layers - 1:
@@ -443,17 +390,8 @@ class LlamaLM(OptLM):
                     break
                 self.store_cache(i, j - 1, 0)
                 self.store_hidden(i, j, 0)
-                self.sync()
-                if (
-                    j in self.attn_layer
-                    and self.attn_layer.index(j) % int(self.policy.layer_cache_budget / 2) == 0
-                    and not (j == 1 and i == 0)
-                    and not warmup
-                    and i < 64
-                ):
-                    self.set_policy_cache(j)
-                    for l in self.attn_layer:
-                        self.set_cache(i, l, 0)
+                if j in self.attn_layer and self.attn_layer.index(j) + 1 % step == 0:
+                    self.sync()
             timers("generate").stop()
 
             if self.task.stop and np.all(self.stopped):
@@ -500,8 +438,6 @@ def run_flexgen(args):
         CompressionConfig(num_bits=4, group_size=64, group_dim=0, symmetric=False),
         args.compress_cache,
         CompressionConfig(num_bits=4, group_size=64, group_dim=2, symmetric=False),
-        None,
-        None,
     )
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
@@ -519,7 +455,7 @@ def run_flexgen(args):
 
     try:
         print("warmup - generate")
-        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose, warmup=True)
+        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
 
         print("benchmark - generate")
         timers("generate").reset()

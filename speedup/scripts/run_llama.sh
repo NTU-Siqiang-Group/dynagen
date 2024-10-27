@@ -1,6 +1,6 @@
 FLEXGEN_PATH=$PWD/../flexgen
-# for SCHEME in "original" "dynacache" "dynagen"
-for SCHEME in "dynacache"
+# for SCHEME in "original" "dynacache" "dynacache2" "dynagen"
+for SCHEME in "dynacache2"
 do
   rm $FLEXGEN_PATH/flexgen/flex_llama.py
   rm $FLEXGEN_PATH/flexgen/flex_opt.py
@@ -15,8 +15,8 @@ do
   # for MODEL in "meta-llama/Llama-3.1-70B-Instruct" 
   do
     CMD="--model $MODEL"
-    CMD=$CMD" --percent 100 0 13 87 100 0"
-    CMD=$CMD" --gpu-batch-size 1 --num-gpu-batches 1 --prompt-len 32 --gen-len 256"
+    CMD=$CMD" --percent 100 0 25 75 100 0"
+    CMD=$CMD" --gpu-batch-size 4 --num-gpu-batches 1 --prompt-len 32 --gen-len 1024"
     if [ "$SCHEME" = "int4" ]
     then
       CMD=$CMD" --compress-cache"
