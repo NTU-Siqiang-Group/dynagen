@@ -3,6 +3,7 @@ Usage:
 python3 -m flexgen.flex_llama --model meta-llama/Llama-2-7b-chat-hf --gpu-batch-size 32 --percent 100 0 100 0 100 0
 """
 
+from math import ceil
 import os
 import torch
 import argparse
@@ -277,7 +278,7 @@ class LlamaSelfAttention(SelfAttention):
             assert device.device_type != DeviceType.MIXED
             device = device.compressed_device
 
-        cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
+        cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy, self.layer_id)
         cache_home.store(cache)
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
@@ -450,6 +451,20 @@ class LlamaLM(OptLM):
         self.weight_read_buf = array_1d(num_layers, ValueHolder)
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
+
+        # Set layer cache percents (for compatibility with args.percents)
+        num_attn_layers = self.config.num_hidden_layers
+        num_gpu_cache_layers = ceil(num_attn_layers * self.policy.cache_gpu_percent / 100)
+        num_cpu_cache_layers = min(num_attn_layers - num_gpu_cache_layers, ceil(num_attn_layers * self.policy.cache_cpu_percent / 100))
+
+        layer_cache_gpu_percents = num_gpu_cache_layers * [100]
+        layer_cache_gpu_percents.extend([0] * (num_attn_layers - num_gpu_cache_layers))
+
+        layer_cache_cpu_percents = num_gpu_cache_layers * [0]
+        layer_cache_cpu_percents.extend([100] * num_cpu_cache_layers)
+        layer_cache_cpu_percents.extend([0] * (num_attn_layers - num_gpu_cache_layers - num_cpu_cache_layers))
+
+        self.policy.layer_cache_gpu_percents, self.policy.layer_cache_cpu_percents = layer_cache_gpu_percents, layer_cache_cpu_percents
 
         self.task = None
         self.weight_manager = TorchCPUWeightTensorManager(self.env)
