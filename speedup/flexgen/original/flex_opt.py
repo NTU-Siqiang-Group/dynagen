@@ -918,6 +918,7 @@ class OptLM:
         cut_gen_len: Optional[int] = None,
         verbose: int = 0,
         evaluate: bool = False,
+        warmup: bool = False,
     ):
         if evaluate:
             assert max_new_tokens == 1 and self.num_gpu_batches == 1 and self.policy.gpu_batch_size == 1
@@ -976,7 +977,7 @@ class OptLM:
             else:
                 # Overlap I/O and compute
                 if num_gpu_batches == 1:
-                    self.generation_loop_overlap_single_batch(evaluate)
+                    self.generation_loop_overlap_single_batch(evaluate, warmup=warmup)
                 else:
                     self.generation_loop_overlap_multi_batch()
         elif debug_mode == "fewer_batch":
@@ -1107,30 +1108,60 @@ class OptLM:
                 costs = timers(name).costs
                 print(f"{name:22s} (per-batch): {np.mean(costs):.6f} s")
 
-    def generation_loop_overlap_single_batch(self, evaluate):
+    def generation_loop_overlap_single_batch(self, evaluate, warmup=False):
         # Prologue
         self.load_weight(0, 0, 0)
         self.sync()
 
         # Generate
-        for i in tqdm(range(self.execute_gen_len)):
-            timers("generate").start()
-            self.update_attention_mask(i, 0)
-            for j in range(self.num_layers):
-                self.load_weight(i, j + 1, 0)
-                self.load_cache(i, j + 1, 0)
-                self.load_hidden(i, j, 0)
-                self.compute_layer(i, j, 0)
-                if evaluate and j == self.num_layers - 1:
-                    self.sync()
-                    break
-                self.store_cache(i, j - 1, 0)
-                self.store_hidden(i, j, 0)
-                self.sync()
-            timers("generate").stop()
+        if not warmup:
+            profile_logdir = "./logs"
+            with torch.profiler.profile(
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_logdir),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+                with_flops=True,
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            ) as prof:
+                for i in tqdm(range(self.execute_gen_len)):
+                    timers("generate").start()
+                    self.update_attention_mask(i, 0)
+                    for j in range(self.num_layers):
+                        self.load_weight(i, j + 1, 0)
+                        self.load_cache(i, j + 1, 0)
+                        self.load_hidden(i, j, 0)
+                        self.compute_layer(i, j, 0)
+                        if evaluate and j == self.num_layers - 1:
+                            self.sync()
+                            break
+                        self.store_cache(i, j - 1, 0)
+                        self.store_hidden(i, j, 0)
+                        self.sync()
+                    timers("generate").stop()
 
-            if self.task.stop and np.all(self.stopped):
-                break
+                    if self.task.stop and np.all(self.stopped):
+                        break
+                    prof.step()
+        else:
+            for i in tqdm(range(self.execute_gen_len)):
+                timers("generate").start()
+                self.update_attention_mask(i, 0)
+                for j in range(self.num_layers):
+                    self.load_weight(i, j + 1, 0)
+                    self.load_cache(i, j + 1, 0)
+                    self.load_hidden(i, j, 0)
+                    self.compute_layer(i, j, 0)
+                    if evaluate and j == self.num_layers - 1:
+                        self.sync()
+                        break
+                    self.store_cache(i, j - 1, 0)
+                    self.store_hidden(i, j, 0)
+                    self.sync()
+                timers("generate").stop()
+
+                if self.task.stop and np.all(self.stopped):
+                    break
 
     def generation_loop_overlap_multi_batch(self):
         # Prologue

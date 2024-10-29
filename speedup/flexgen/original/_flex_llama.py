@@ -410,7 +410,7 @@ def run_flexgen(args):
 
     try:
         print("warmup - generate")
-        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose, warmup=True)
+        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
 
         print("benchmark - generate")
         timers("generate").reset()
