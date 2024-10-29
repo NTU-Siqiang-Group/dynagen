@@ -22,12 +22,12 @@ class TorchCacheTensor(TorchTensor):
         else:
             general_copy(self._cpu_tensor, indices, new_cache, None)
 
-    def set_cache_percents(self, policy, num_head: int, cache_write_buf: TorchTensor):
+    def set_cache_percents(self, cache_gpu_percent: int, cache_cpu_percent: int, num_head: int, cache_write_buf: TorchTensor):
         '''
         Set the cache percents (seg_lengths) to the values specified in the policy.
         '''
         shape = self.shape
-        seg_lengths = self.device.get_seg_lengths(policy, self.shape, num_head) # (len_gpu, len_cpu, len_disk)
+        seg_lengths = self.device.get_seg_lengths(cache_gpu_percent, cache_cpu_percent, self.shape, num_head) # (len_gpu, len_cpu, len_disk)
         is_using_buf = cache_write_buf and cache_write_buf.device and cache_write_buf.device.device_type == DeviceType.CUDA
 
         seg_points = [0]
@@ -75,15 +75,15 @@ class TorchCacheTensorDevice(TorchMixedDevice):
                 break
         self.device_type = DeviceType.CACHE_MIXED
 
-    def get_seg_lengths(self, policy, shape, num_head):
+    def get_seg_lengths(self, cache_gpu_percent, cache_cpu_percent, shape, num_head):
         # We have to round to a multiple of `num_head`
-        if policy.cache_disk_percent == 0:
-            len_gpu = int(shape[SEG_DIM] * policy.cache_gpu_percent / 100) // num_head * num_head
+        if cache_gpu_percent + cache_cpu_percent == 100:
+            len_gpu = int(shape[SEG_DIM] * cache_gpu_percent / 100) // num_head * num_head
             len_cpu = shape[SEG_DIM] - len_gpu
             len_disk = 0
         else:
-            len_gpu = int(shape[SEG_DIM] * policy.cache_gpu_percent / 100) // num_head * num_head
-            len_cpu = int(shape[SEG_DIM] * policy.cache_cpu_percent / 100) // num_head * num_head
+            len_gpu = int(shape[SEG_DIM] * cache_gpu_percent / 100) // num_head * num_head
+            len_cpu = int(shape[SEG_DIM] * cache_cpu_percent / 100) // num_head * num_head
             len_disk = shape[SEG_DIM] - len_gpu - len_cpu
         return (len_gpu, len_cpu, len_disk)
 

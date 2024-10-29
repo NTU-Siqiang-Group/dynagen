@@ -818,7 +818,7 @@ class TorchMixedDevice:
             if x:
                 x.delete()
 
-    def init_cache_one_gpu_batch(self, config, task, policy):
+    def init_cache_one_gpu_batch(self, config, task, policy, layer_id):
         num_head, hidden_size, prompt_len, gen_len, gpu_batch_size = (
             config.n_head,
             config.input_dim,
@@ -829,13 +829,15 @@ class TorchMixedDevice:
         shape = (prompt_len + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
 
         # We have to round to a multiple of `num_head`
-        if policy.cache_disk_percent == 0:
-            len_gpu = int(shape[SEG_DIM] * policy.cache_gpu_percent / 100) // num_head * num_head
+        cache_gpu_percent, cache_cpu_percent = policy.layer_cache_gpu_percents[layer_id], policy.layer_cache_cpu_percents[layer_id]
+        assert cache_gpu_percent + cache_cpu_percent <= 100
+        if cache_gpu_percent + cache_cpu_percent == 100:
+            len_gpu = int(shape[SEG_DIM] * cache_gpu_percent / 100) // num_head * num_head
             len_cpu = shape[SEG_DIM] - len_gpu
             len_disk = 0
         else:
-            len_gpu = int(shape[SEG_DIM] * policy.cache_gpu_percent / 100) // num_head * num_head
-            len_cpu = int(shape[SEG_DIM] * policy.cache_cpu_percent / 100) // num_head * num_head
+            len_gpu = int(shape[SEG_DIM] * cache_gpu_percent / 100) // num_head * num_head
+            len_cpu = int(shape[SEG_DIM] * cache_cpu_percent / 100) // num_head * num_head
             len_disk = shape[SEG_DIM] - len_gpu - len_cpu
         lens = [len_gpu, len_cpu, len_disk]
 

@@ -5,6 +5,7 @@ python3 -m flexgen.flex_opt --model facebook/opt-1.3b --gpu-batch-size 32 --perc
 
 import argparse
 import dataclasses
+from math import ceil
 import os
 from typing import Union, List, Optional
 
@@ -49,18 +50,18 @@ fix_recursive_import()
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=False)
 class Policy:
     gpu_batch_size: int
     num_gpu_batches: int
 
     # percent = a means a%
-    w_gpu_percent: float
-    w_cpu_percent: float
-    cache_gpu_percent: float
-    cache_cpu_percent: float
-    act_gpu_percent: float
-    act_cpu_percent: float
+    w_gpu_percent: int
+    w_cpu_percent: int
+    cache_gpu_percent: int
+    cache_cpu_percent: int
+    act_gpu_percent: int
+    act_cpu_percent: int
 
     # Whether to overlap the I/O and compute
     overlap: bool
@@ -85,13 +86,13 @@ class Policy:
     compress_cache: bool
     comp_cache_config: CompressionConfig
 
+    # Cache percentage for each layer
+    layer_cache_gpu_percents: List[int] = None
+    layer_cache_cpu_percents: List[int] = None
+
     @property
     def w_disk_percent(self):
         return 100 - self.w_gpu_percent - self.w_cpu_percent
-
-    @property
-    def cache_disk_percent(self):
-        return 100 - self.cache_gpu_percent - self.cache_cpu_percent
 
     @property
     def act_disk_percent(self):
@@ -348,7 +349,7 @@ class SelfAttention:
             assert device.device_type != DeviceType.MIXED
             device = device.compressed_device
 
-        cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
+        cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy, self.layer_id)
         cache_home.store(cache)
         if self.layer_id > 1:
             self.prefetch_kv = self.attention_compute.allocate(
@@ -516,8 +517,10 @@ class SelfAttention:
 
         k_home, v_home = cache_home.val
         k_buf, v_buf = cache_write_buf.pop()
-        k_home.set_cache_percents(self.policy, self.config.n_head, k_buf)
-        v_home.set_cache_percents(self.policy, self.config.n_head, v_buf)
+        cache_gpu_percent = self.policy.layer_cache_gpu_percents[self.layer_id]
+        cache_cpu_percent = self.policy.layer_cache_cpu_percents[self.layer_id]
+        k_home.set_cache_percents(cache_gpu_percent, cache_cpu_percent, self.config.n_head, k_buf)
+        v_home.set_cache_percents(cache_gpu_percent, cache_cpu_percent, self.config.n_head, v_buf)
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
@@ -897,6 +900,20 @@ class OptLM:
         self.partial_weight_read_buf = array_1d(num_layers, ValueHolder)
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
+
+        # Set layer cache percents (for compatibility with args.percents)
+        num_attn_layers = self.config.num_hidden_layers
+        num_gpu_cache_layers = ceil(num_attn_layers * self.policy.cache_gpu_percent / 100)
+        num_cpu_cache_layers = min(num_attn_layers - num_gpu_cache_layers, ceil(num_attn_layers * self.policy.cache_cpu_percent / 100))
+
+        layer_cache_gpu_percents = num_gpu_cache_layers * [100]
+        layer_cache_gpu_percents.extend([0] * (num_attn_layers - num_gpu_cache_layers))
+
+        layer_cache_cpu_percents = num_gpu_cache_layers * [0]
+        layer_cache_cpu_percents.extend([100] * num_cpu_cache_layers)
+        layer_cache_cpu_percents.extend([0] * (num_attn_layers - num_gpu_cache_layers - num_cpu_cache_layers))
+
+        self.policy.layer_cache_gpu_percents, self.policy.layer_cache_cpu_percents = layer_cache_gpu_percents, layer_cache_cpu_percents
 
         self.task = None
         self.weight_manager = TorchCPUWeightTensorManager(self.env)

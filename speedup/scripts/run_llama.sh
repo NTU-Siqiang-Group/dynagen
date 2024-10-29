@@ -15,7 +15,7 @@ do
   # for MODEL in "meta-llama/Llama-3.1-70B-Instruct" 
   do
     CMD="--model $MODEL"
-    CMD=$CMD" --percent 100 0 25 75 100 0"
+    CMD=$CMD" --percent 100 0 40 60 100 0"
     CMD=$CMD" --gpu-batch-size 4 --num-gpu-batches 1 --prompt-len 32 --gen-len 1024"
     if [ "$SCHEME" = "int4" ]
     then
