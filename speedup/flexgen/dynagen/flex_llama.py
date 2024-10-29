@@ -124,7 +124,7 @@ class LlamaOutputEmbed(OutputEmbed):
             w_token,
             self.config.rms_norm_eps,
             donate,
-            do_sample=True,
+            do_sample=False,
             temperature=0.5,
             evaluate=self.task.evaluate,
         )
@@ -455,7 +455,9 @@ class LlamaLM(OptLM):
         # Set layer cache percents (for compatibility with args.percents)
         num_attn_layers = self.config.num_hidden_layers
         num_gpu_cache_layers = ceil(num_attn_layers * self.policy.cache_gpu_percent / 100)
-        num_cpu_cache_layers = min(num_attn_layers - num_gpu_cache_layers, ceil(num_attn_layers * self.policy.cache_cpu_percent / 100))
+        num_cpu_cache_layers = min(
+            num_attn_layers - num_gpu_cache_layers, ceil(num_attn_layers * self.policy.cache_cpu_percent / 100)
+        )
 
         layer_cache_gpu_percents = num_gpu_cache_layers * [100]
         layer_cache_gpu_percents.extend([0] * (num_attn_layers - num_gpu_cache_layers))
@@ -464,7 +466,10 @@ class LlamaLM(OptLM):
         layer_cache_cpu_percents.extend([100] * num_cpu_cache_layers)
         layer_cache_cpu_percents.extend([0] * (num_attn_layers - num_gpu_cache_layers - num_cpu_cache_layers))
 
-        self.policy.layer_cache_gpu_percents, self.policy.layer_cache_cpu_percents = layer_cache_gpu_percents, layer_cache_cpu_percents
+        self.policy.layer_cache_gpu_percents, self.policy.layer_cache_cpu_percents = (
+            layer_cache_gpu_percents,
+            layer_cache_cpu_percents,
+        )
 
         self.task = None
         self.weight_manager = TorchCPUWeightTensorManager(self.env)
@@ -676,7 +681,13 @@ def run_flexgen(args):
     gpu = LlamaTorchDevice("cuda:0")
     cpu = LlamaTorchDevice("cpu")
     disk = TorchDisk(args.offload_dir)
-    env = ExecutionEnv(gpu=gpu, cpu=cpu, disk=disk, mixed=TorchMixedDevice([gpu, cpu, disk]), cache_mixed=TorchCacheTensorDevice([gpu, cpu, disk]))
+    env = ExecutionEnv(
+        gpu=gpu,
+        cpu=cpu,
+        disk=disk,
+        mixed=TorchMixedDevice([gpu, cpu, disk]),
+        cache_mixed=TorchCacheTensorDevice([gpu, cpu, disk]),
+    )
 
     policy = Policy(
         args.gpu_batch_size,

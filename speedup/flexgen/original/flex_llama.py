@@ -116,7 +116,7 @@ class LlamaOutputEmbed(OutputEmbed):
             w_token,
             self.config.rms_norm_eps,
             donate,
-            do_sample=True,
+            do_sample=False,
             temperature=0.5,
             evaluate=self.task.evaluate,
         )
