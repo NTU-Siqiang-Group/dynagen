@@ -10,7 +10,8 @@ from typing import Union
 from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
-from flexgen.pytorch_backend import LlamaTorchDevice, TorchDisk, TorchMixedDevice, fix_recursive_import
+from flexgen.computation_policy import get_computation_policy
+from flexgen.pytorch_backend import LlamaTorchDevice, TorchDisk, get_torch_mixed_device_mem_manager, fix_recursive_import
 from flexgen.flex_opt import (
     Policy,
     init_weight_list,
@@ -300,6 +301,7 @@ class LlamaLM(OptLM):
         self.path = path
         self.policy = policy
         self.num_gpu_batches = policy.num_gpu_batches
+        self.computation_policy = get_computation_policy()
 
         layers = []
         layers.append(LlamaInputEmbed(self.config, self.env, self.policy))
@@ -373,7 +375,7 @@ def run_flexgen(args):
     gpu = LlamaTorchDevice("cuda:0")
     cpu = LlamaTorchDevice("cpu")
     disk = TorchDisk(args.offload_dir)
-    env = ExecutionEnv(gpu=gpu, cpu=cpu, disk=disk, mixed=TorchMixedDevice([gpu, cpu, disk]))
+    env = ExecutionEnv(gpu=gpu, cpu=cpu, disk=disk, mixed=get_torch_mixed_device_mem_manager('default', [gpu, cpu, disk]))
 
     policy = Policy(
         args.gpu_batch_size,
