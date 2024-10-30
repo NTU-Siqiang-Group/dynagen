@@ -8,7 +8,7 @@ do
   do
     CMD="--model $MODEL"
     CMD=$CMD" --percent 100 0 40 60 100 0"
-    CMD=$CMD" --gpu-batch-size 4 --num-gpu-batches 1 --prompt-len 32 --gen-len 1024"
+    CMD=$CMD" --gpu-batch-size 2 --num-gpu-batches 1 --prompt-len 32 --gen-len 512"
     if [ "$SCHEME" = "int4" ]
     then
       CMD=$CMD" --compress-cache"

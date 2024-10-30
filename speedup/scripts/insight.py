@@ -1,6 +1,7 @@
 import torch
 import time
-
+import torch.profiler
+from torch.profiler import tensorboard_trace_handler
 
 def generate_tensors(num_tensors, batch_size, seq_len, hidden_size):
     tensors_a = []
@@ -149,24 +150,43 @@ def main():
     times_method1 = []
     times_method2 = []
 
-    for i in range(num_runs):
-        t = method1(tensors_a, tensors_b)
-        times_method1.append(t)
+    profile_logdir = "./logs"
+
+    # Set up the profiler
+    with torch.profiler.profile(
+        schedule=torch.profiler.schedule(wait=0, warmup=0, active=0),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_logdir),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        with_flops=True,
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+    ) as prof:
+        for i in range(num_runs):
+            t = method1(tensors_a, tensors_b)
+            times_method1.append(t)
+            prof.step()
 
     avg_time_method1 = sum(times_method1) / num_runs
     print(f"\n{num_runs} method1: {avg_time_method1:.6f} s")
 
-    for i in range(num_runs):
-        t = method2(tensors_a2, tensors_b2)
-        times_method2.append(t)
+    # with torch.profiler.profile(
+    #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+    #     record_shapes=True,
+    #     profile_memory=True,
+    #     with_stack=True,
+    # ) as prof:
+    #     for i in range(num_runs):
+    #         t = method2(tensors_a2, tensors_b2)
+    #         times_method2.append(t)
 
-    avg_time_method2 = sum(times_method2) / num_runs
-    print(f"\n{num_runs} method2: {avg_time_method2:.6f} s")
+    # avg_time_method2 = sum(times_method2) / num_runs
+    # print(f"\n{num_runs} method2: {avg_time_method2:.6f} s")
 
-    time_diff = avg_time_method2 - avg_time_method1
-    print(f"\nmethod2 - method1: {time_diff:.6f} s")
-    time_diff = (avg_time_method1 - avg_time_method2) / avg_time_method1
-    print(f"\n(method2 - method1)/method1: {time_diff*100:.1f}%")
+    # time_diff = avg_time_method2 - avg_time_method1
+    # print(f"\nmethod2 - method1: {time_diff:.6f} s")
+    # time_diff = (avg_time_method1 - avg_time_method2) / avg_time_method1
+    # print(f"\n(method2 - method1)/method1: {time_diff*100:.1f}%")
 
 
 if __name__ == "__main__":
