@@ -17,8 +17,7 @@ def get_inputs(tokenizer, prompt, prompt_len = None):
     input_ids = tokenizer(prompt, add_special_tokens=False).input_ids
     return (input_ids[0][:prompt_len],)
 
-
-def init_flexgen(args):
+def init_flexgen(args, tokenizer):
     with open(args.warmup_input_path, "r") as f:
         prompt = [f.read()]
     warmup_inputs = get_inputs(tokenizer, prompt, 2048)
@@ -43,12 +42,9 @@ def init_flexgen(args):
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
     opt_config = get_opt_config(args.model)
-    # cache_size = opt_config.cache_bytes(num_prompts, prompt_len + gen_len)
-    # hidden_size = opt_config.hidden_bytes(num_prompts, prompt_len + gen_len)
-    model = OptLM(opt_config, env, args.path, policy, args.partial_weight_ratio, args.alpha, args.max_num_kv)
-    model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose, warmup=True)
+    model = OptLM(opt_config, env, args.path, policy)
+    model.generate(warmup_inputs, max_new_tokens=1)
     return model, env
-
 
 def run_flexgen(model, tokenizer, prompt):
     # Task and policy
@@ -56,10 +52,8 @@ def run_flexgen(model, tokenizer, prompt):
 
     timers("generate").reset()
     logits = model.generate(inputs, max_new_tokens=1, cut_gen_len=1, evaluate=True)
-    # costs = timers("generate").costs
     
     return logits
-
 
 if __name__ == "__main__":
     # Set the current working directory to the location of the Python file
@@ -84,7 +78,7 @@ if __name__ == "__main__":
         tokenizer = AutoTokenizer.from_pretrained("facebook/galactica-30b", padding_side="left")
     else:
         tokenizer = AutoTokenizer.from_pretrained("facebook/opt-30b", padding_side="left")
-    model, env = init_flexgen(args)
+    model, env = init_flexgen(args, tokenizer)
 
     requests = []
     with open(input_path, "r") as f:
@@ -116,10 +110,6 @@ if __name__ == "__main__":
                     {tokenizer.convert_ids_to_tokens(i.item()): v.item()}
                     for v, i in zip(values.squeeze(-1), indices.squeeze(-1))
                 ]
-                # for v, i in zip(values.squeeze(-1), indices.squeeze(-1)):
-                #     top_logprobs.append({
-                #         tokenizer.convert_ids_to_tokens(i.item()): v.item()
-                #     })
 
                 result["result"] = {
                     "choices": [
