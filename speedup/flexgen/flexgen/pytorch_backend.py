@@ -762,7 +762,26 @@ class TorchDisk:
 SEG_DIM = 1
 
 
-class TorchMixedDevice:
+
+class TorchMixedDeviceMemManager:
+    """
+    Interface for managing memory on mixed devices.
+    """
+    def allocate(self, shape, dtype, seg_lengths, pin_memory=None, name=None):
+        raise NotImplementedError()
+
+    def delete(self, tensor):
+        raise NotImplementedError()
+    
+    def init_cache_one_gpu_batch(self, config, task, policy):
+        raise NotImplementedError()
+
+def get_torch_mixed_device_mem_manager(choice='default', base_devices=[]) -> TorchMixedDeviceMemManager:
+    if choice == 'default':
+        return TorchMixedDevice(base_devices)
+    return TorchMixedDeviceMemManager()
+
+class TorchMixedDevice(TorchMixedDeviceMemManager):
     """Manage tensors stored on multiple physical devices."""
 
     def __init__(self, base_devices):
