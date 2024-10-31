@@ -7,8 +7,8 @@ do
   # for MODEL in "meta-llama/Llama-3.1-70B-Instruct" 
   do
     CMD="--model $MODEL"
-    CMD=$CMD" --percent 100 0 40 60 100 0"
-    CMD=$CMD" --gpu-batch-size 2 --num-gpu-batches 1 --prompt-len 32 --gen-len 512"
+    CMD=$CMD" --percent 100 0 50 50 100 0"
+    CMD=$CMD" --gpu-batch-size 2 --num-gpu-batches 2 --prompt-len 32 --gen-len 512 --profile-dir ./logs"
     if [ "$SCHEME" = "int4" ]
     then
       CMD=$CMD" --compress-cache"

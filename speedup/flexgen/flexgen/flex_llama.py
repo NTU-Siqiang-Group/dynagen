@@ -422,6 +422,7 @@ def run_flexgen(args):
             debug_mode=args.debug_mode,
             cut_gen_len=cut_gen_len,
             verbose=args.verbose,
+            profile_dir=args.profile_dir,
         )
         costs = timers("generate").costs
     finally:
@@ -519,6 +520,7 @@ def add_parser_arguments(parser):
     parser.add_argument("--no-log", action="store_true")
     parser.add_argument("--verbose", type=int, default=2)
     parser.add_argument("--overlap", type=str2bool, nargs="?", const=True, default=True)
+    parser.add_argument("--profile-dir", type=str, default=None)
 
 
 if __name__ == "__main__":
