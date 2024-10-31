@@ -920,6 +920,7 @@ class OptLM:
         cut_gen_len: Optional[int] = None,
         verbose: int = 0,
         evaluate: bool = False,
+        profile_dir: str = None,
     ):
         if evaluate:
             assert max_new_tokens == 1 and self.num_gpu_batches == 1 and self.policy.gpu_batch_size == 1
@@ -978,9 +979,9 @@ class OptLM:
             else:
                 # Overlap I/O and compute
                 if num_gpu_batches == 1:
-                    self.generation_loop_overlap_single_batch(evaluate)
+                    self.generation_loop_overlap_single_batch(evaluate, profile_dir=profile_dir)
                 else:
-                    self.generation_loop_overlap_multi_batch()
+                    self.generation_loop_overlap_multi_batch(profile_dir=profile_dir)
         elif debug_mode == "fewer_batch":
             # Run fewer layeres and batches for debugging
             if num_gpu_batches == 1:
@@ -1111,7 +1112,7 @@ class OptLM:
         #         costs = timers(name).costs
         #         print(f"{name:22s} (per-batch): {np.mean(costs):.6f} s")
 
-    def generation_loop_overlap_single_batch(self, evaluate):
+    def generation_loop_overlap_single_batch(self, evaluate, profile_dir=None):
         # # Prologue
         # self.load_weight(0, 0, 0)
         # self.sync()
@@ -1135,10 +1136,10 @@ class OptLM:
 
         #     if self.task.stop and np.all(self.stopped):
         #         break
-        self.computation_policy.generation_loop_overlap_single_batch(self, evaluate)
+        self.computation_policy.generation_loop_overlap_single_batch(self, evaluate, profile_dir)
 
-    def generation_loop_overlap_multi_batch(self):
-        self.computation_policy.generation_loop_overlap_multi_batch(self)
+    def generation_loop_overlap_multi_batch(self, profile_dir=None):
+        self.computation_policy.generation_loop_overlap_multi_batch(self, profile_dir)
         # # Prologue
         # for k in range(self.num_gpu_batches):
         #     self.load_weight(0, 0, k)
@@ -1351,6 +1352,7 @@ def run_flexgen(args):
             debug_mode=args.debug_mode,
             cut_gen_len=cut_gen_len,
             verbose=args.verbose,
+            profile_dir=args.profile_dir,
         )
         costs = timers("generate").costs
     finally:
@@ -1424,6 +1426,7 @@ def add_parser_arguments(parser):
     parser.add_argument("--log-file", type=str, default="auto")
     parser.add_argument("--no-log", action="store_true")
     parser.add_argument("--verbose", type=int, default=2)
+    parser.add_argument("--profile-dir", type=str, default=None)
 
     parser.add_argument("--overlap", type=str2bool, nargs="?", const=True, default=True)
 
