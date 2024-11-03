@@ -190,7 +190,10 @@ class LlamaSelfAttention(SelfAttention):
             mask_gpu = attention_mask[1].val
             donate[1] = False
         else:
-            mask_gpu, donate[1] = attention_mask.val.smart_copy(self.compute)
+            if i==0:
+                mask_gpu, donate[1] = attention_mask.val.smart_copy(self.compute)
+            else:   
+                mask_gpu, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (
