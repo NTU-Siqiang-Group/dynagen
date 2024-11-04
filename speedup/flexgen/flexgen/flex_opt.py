@@ -198,7 +198,11 @@ class InputEmbed:
         # Compute input embedding
         donate = [False] * 4
         h, donate[0] = hidden.val, True
-        mask, donate[1] = attention_mask.val.smart_copy(self.compute)
+        if isinstance(attention_mask, tuple):
+            mask = attention_mask[1].val
+            donate[1] = False
+        else:
+            mask, donate[1] = attention_mask.val.smart_copy(self.compute)
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
@@ -461,7 +465,15 @@ class SelfAttention:
 
         donate = [False] * 14
         h, donate[0] = hidden.val, True
-
+        if isinstance(attention_mask, tuple):
+            mask_cpu = attention_mask[0].val
+            mask_gpu = attention_mask[1].val
+            donate[1] = False
+        else:
+            if i == 0:
+                mask_gpu, donate[1] = attention_mask.val.smart_copy(self.compute)
+            else:
+                mask_gpu, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (
@@ -491,10 +503,10 @@ class SelfAttention:
             ) = weight_read_buf.val
 
         if i == 0:  # prefill
-            mask, donate[1] = attention_mask.val.smart_copy(self.compute)
+            # mask, donate[1] = attention_mask.val.smart_copy(self.compute)
             h, new_k_cache, new_v_cache = self.compute.mha(
                 h,
-                mask,
+                mask_gpu,
                 w_q,
                 b_q,
                 w_k,
@@ -512,11 +524,11 @@ class SelfAttention:
             )
             cache_write_buf.store((new_k_cache, new_v_cache))
         else:  # decoding
-            mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
+            # mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
             (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
             h, new_k_cache, new_v_cache = self.compute.mha_gen(
                 h,
-                mask,
+                (mask_cpu, mask_gpu) if isinstance(attention_mask, tuple) else mask_gpu,
                 w_q,
                 b_q,
                 w_k,
@@ -717,6 +729,13 @@ class OptLM:
         self.weight_read_buf = array_1d(num_layers, ValueHolder)
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
+        self.attention_mask_gpu = None
+        if (
+            self.policy.cpu_cache_compute
+            and self.policy.cache_cpu_percent < 100
+            and self.policy.cache_gpu_percent < 100
+        ):
+            self.attention_mask_gpu = array_1d(num_gpu_batches, ValueHolder)
 
         self.task = None
         self.init_all_weights()
@@ -873,7 +892,11 @@ class OptLM:
             self.hidden[i][j][k],
             self.cache_read_buf[j][k],
             self.weight_read_buf[j],
-            self.attention_mask[k],
+            (
+                (self.attention_mask[k], self.attention_mask_gpu[k])
+                if self.attention_mask_gpu
+                else self.attention_mask[k]
+            ),
             self.cache_write_buf[j][k],
             i,
             k,
@@ -897,6 +920,11 @@ class OptLM:
             mask = self.attention_mask[k]
             assert mask.val is not None
             mask.val = mask.val.device.extend_attention_mask(mask.val, [True])
+
+            if self.attention_mask_gpu:
+                mask = self.attention_mask_gpu[k]
+                assert mask.val is not None
+                mask.val = mask.val.device.extend_attention_mask(mask.val, [True])
             return
 
         gpu_batch_size = self.policy.gpu_batch_size
@@ -908,6 +936,18 @@ class OptLM:
         val = attention_compute.allocate((self.policy.gpu_batch_size, self.task.prompt_len), bool)
         val.load_from_np((input_ids != self.config.pad_token_id))
         self.attention_mask[k].store(val)
+
+        if self.attention_mask_gpu:
+
+            gpu_batch_size = self.policy.gpu_batch_size
+            left = k * gpu_batch_size
+            right = left + gpu_batch_size
+            input_ids = self.output_ids[left:right, : self.task.prompt_len]
+
+            attention_compute = self.env.gpu
+            val = attention_compute.allocate((self.policy.gpu_batch_size, self.task.prompt_len), bool)
+            val.load_from_np((input_ids != self.config.pad_token_id))
+            self.attention_mask_gpu[k].store(val)
 
     def generate(
         self,
@@ -961,6 +1001,8 @@ class OptLM:
             self.weight_read_buf[j].clear()
         for k in range(num_gpu_batches):
             self.attention_mask[k].clear()
+            if self.attention_mask_gpu:
+                self.attention_mask_gpu[k].clear()
         self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
 
         # Init cache
@@ -1000,6 +1042,7 @@ class OptLM:
                 self.delete_cache(j, k)
         if self.policy.cpu_cache_compute:
             self.env.cpu.del_attention_compute_workspace()
+            self.env.gpu.del_attention_compute_workspace()
 
         if evaluate:
             return self.hidden[0][-1][0].val.data.detach().cpu()
@@ -1298,7 +1341,6 @@ def get_inputs(prompt_len, num_prompts, tokenizer, path):
     input_ids[0] = input_ids[0][:prompt_len]
     return (input_ids[0],) * num_prompts
 
-
 def run_flexgen(args):
     if args.model == "facebook/galactica-30b":
         tokenizer = AutoTokenizer.from_pretrained("facebook/galactica-30b", padding_side="left")
@@ -1308,7 +1350,7 @@ def run_flexgen(args):
     prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
 
     # Task and policy
-    warmup_inputs = get_inputs(2048, num_prompts, tokenizer, args.warmup_input_path)
+    warmup_inputs = get_inputs(32, num_prompts, tokenizer, args.warmup_input_path)
     inputs = get_inputs(prompt_len, num_prompts, tokenizer, args.test_input_path)
 
     gpu = TorchDevice("cuda:0")
@@ -1430,9 +1472,8 @@ def add_parser_arguments(parser):
 
     parser.add_argument("--overlap", type=str2bool, nargs="?", const=True, default=True)
 
-    parser.add_argument("--warmup-input-path", type=str)
-    parser.add_argument("--test-input-path", type=str)
-
+    parser.add_argument("--warmup-input-path", type=str, default="./pg19_firstbook.txt")
+    parser.add_argument("--test-input-path", type=str, default="./pg19_firstbook.txt")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

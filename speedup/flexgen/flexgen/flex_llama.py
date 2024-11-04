@@ -11,7 +11,12 @@ from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
 from flexgen.computation_policy import get_computation_policy
-from flexgen.pytorch_backend import LlamaTorchDevice, TorchDisk, get_torch_mixed_device_mem_manager, fix_recursive_import
+from flexgen.pytorch_backend import (
+    LlamaTorchDevice,
+    TorchDisk,
+    get_torch_mixed_device_mem_manager,
+    fix_recursive_import,
+)
 from flexgen.flex_opt import (
     Policy,
     init_weight_list,
@@ -65,8 +70,12 @@ class LlamaInputEmbed(InputEmbed):
         # Compute input embedding
         donate = [False] * 3
         h, donate[0] = hidden.val, True
-        mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-
+        # mask, donate[1] = attention_mask.val.smart_copy(self.compute)
+        if isinstance(attention_mask, tuple):
+            mask = attention_mask[1].val
+            donate[1] = False
+        else:
+            mask, donate[1] = attention_mask.val.smart_copy(self.compute)
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             ((w_token, donate[2]),) = weight_read_buf.pop()
@@ -176,7 +185,15 @@ class LlamaSelfAttention(SelfAttention):
 
         donate = [False] * 10
         h, donate[0] = hidden.val, True
-
+        if isinstance(attention_mask, tuple):
+            mask_cpu = attention_mask[0].val
+            mask_gpu = attention_mask[1].val
+            donate[1] = False
+        else:
+            if i == 0:
+                mask_gpu, donate[1] = attention_mask.val.smart_copy(self.compute)
+            else:
+                mask_gpu, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (
@@ -191,12 +208,12 @@ class LlamaSelfAttention(SelfAttention):
             ((w_ln, _), (w_q, _), (w_k, _), (w_v, _), (w_re, _), (w_o, _)) = weight_read_buf.val
 
         if i == 0:  # prefill
-            mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-            position_ids = torch.cumsum(mask.data, dim=1).int() * mask.data + 1
+            # mask, donate[1] = attention_mask.val.smart_copy(self.compute)
+            position_ids = torch.cumsum(mask_gpu.data, dim=1).int() * mask_gpu.data + 1
             h, new_k_cache, new_v_cache = self.compute.llama_mha(
                 h,
                 position_ids,
-                mask,
+                mask_gpu,
                 w_ln,
                 w_q,
                 w_k,
@@ -212,14 +229,14 @@ class LlamaSelfAttention(SelfAttention):
             )
             cache_write_buf.store((new_k_cache, new_v_cache))
         else:  # decoding
-            mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
+            # mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
             (k_cache, donate[8]), (v_cache, donate[9]) = cache_read_buf.pop()
-            position_ids = torch.cumsum(mask.data, dim=1).long() * mask.data + 1
+            position_ids = torch.cumsum(mask_gpu.data, dim=1).long() * mask_gpu.data + 1
             position_ids = position_ids[:, -h.shape[1]].unsqueeze(1)
             h, new_k_cache, new_v_cache = self.compute.llama_mha_gen(
                 h,
                 position_ids,
-                mask,
+                (mask_cpu, mask_gpu) if isinstance(attention_mask, tuple) else mask_gpu,
                 w_ln,
                 w_q,
                 w_k,
@@ -342,7 +359,13 @@ class LlamaLM(OptLM):
         self.weight_read_buf = array_1d(num_layers, ValueHolder)
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
-
+        self.attention_mask_gpu = None
+        if (
+            self.policy.cpu_cache_compute
+            and self.policy.cache_cpu_percent < 100
+            and self.policy.cache_gpu_percent < 100
+        ):
+            self.attention_mask_gpu = array_1d(num_gpu_batches, ValueHolder)
         self.task = None
         self.init_all_weights()
 
@@ -354,10 +377,13 @@ class LlamaLM(OptLM):
 
         self.layers[j].init_weight(self.weight_home[j], expanded_path)
 
-
-def get_test_inputs(prompt_len, num_prompts, tokenizer):
-    prompts = ["Write a 30000-word article on the history of the Roman Empire."]
+def get_inputs(prompt_len, num_prompts, tokenizer, path):
+    prompts = []
+    with open(path, "r") as file:
+        prompts.append(file.read())
+    prompts = [prompts[0][: int(prompt_len * 4)]]
     input_ids = tokenizer(prompts, padding="max_length", max_length=prompt_len).input_ids
+    input_ids[0] = input_ids[0][:prompt_len]
     return (input_ids[0],) * num_prompts
 
 
@@ -369,13 +395,15 @@ def run_flexgen(args):
     prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
 
     # Task and policy
-    warmup_inputs = get_test_inputs(32, num_prompts, tokenizer)
-    inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
+    warmup_inputs = get_inputs(32, num_prompts, tokenizer, args.warmup_input_path)
+    inputs = get_inputs(prompt_len, num_prompts, tokenizer, args.test_input_path)
 
     gpu = LlamaTorchDevice("cuda:0")
     cpu = LlamaTorchDevice("cpu")
     disk = TorchDisk(args.offload_dir)
-    env = ExecutionEnv(gpu=gpu, cpu=cpu, disk=disk, mixed=get_torch_mixed_device_mem_manager('default', [gpu, cpu, disk]))
+    env = ExecutionEnv(
+        gpu=gpu, cpu=cpu, disk=disk, mixed=get_torch_mixed_device_mem_manager("default", [gpu, cpu, disk])
+    )
 
     policy = Policy(
         args.gpu_batch_size,
@@ -521,6 +549,9 @@ def add_parser_arguments(parser):
     parser.add_argument("--verbose", type=int, default=2)
     parser.add_argument("--overlap", type=str2bool, nargs="?", const=True, default=True)
     parser.add_argument("--profile-dir", type=str, default=None)
+
+    parser.add_argument("--warmup-input-path", type=str, default="./pg19_firstbook.txt")
+    parser.add_argument("--test-input-path", type=str, default="./pg19_firstbook.txt")
 
 
 if __name__ == "__main__":
