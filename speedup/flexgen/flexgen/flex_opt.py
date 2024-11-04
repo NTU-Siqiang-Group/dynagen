@@ -1341,13 +1341,6 @@ def get_inputs(prompt_len, num_prompts, tokenizer, path):
     input_ids[0] = input_ids[0][:prompt_len]
     return (input_ids[0],) * num_prompts
 
-
-def get_test_inputs(prompt_len, num_prompts, tokenizer):
-    prompts = ["Write a 30000-word article on the history of the Roman Empire."]
-    input_ids = tokenizer(prompts, padding="max_length", max_length=prompt_len).input_ids
-    return (input_ids[0],) * num_prompts
-
-
 def run_flexgen(args):
     if args.model == "facebook/galactica-30b":
         tokenizer = AutoTokenizer.from_pretrained("facebook/galactica-30b", padding_side="left")
@@ -1357,8 +1350,8 @@ def run_flexgen(args):
     prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
 
     # Task and policy
-    warmup_inputs = get_test_inputs(32, num_prompts, tokenizer)
-    inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
+    warmup_inputs = get_inputs(32, num_prompts, tokenizer, args.warmup_input_path)
+    inputs = get_inputs(prompt_len, num_prompts, tokenizer, args.test_input_path)
 
     gpu = TorchDevice("cuda:0")
     cpu = TorchDevice("cpu")
@@ -1479,9 +1472,8 @@ def add_parser_arguments(parser):
 
     parser.add_argument("--overlap", type=str2bool, nargs="?", const=True, default=True)
 
-    parser.add_argument("--warmup-input-path", type=str)
-    parser.add_argument("--test-input-path", type=str)
-
+    parser.add_argument("--warmup-input-path", type=str, default="./pg19_firstbook.txt")
+    parser.add_argument("--test-input-path", type=str, default="./pg19_firstbook.txt")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
