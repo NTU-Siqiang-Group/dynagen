@@ -377,6 +377,7 @@ class LlamaLM(OptLM):
 
         self.layers[j].init_weight(self.weight_home[j], expanded_path)
 
+
 def get_inputs(prompt_len, num_prompts, tokenizer, path):
     prompts = []
     with open(path, "r") as file:

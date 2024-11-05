@@ -3,9 +3,9 @@ FLEXGEN_PATH=$PWD/../flexgen
 for SCHEME in "original"
 do
   # for MODEL in "meta-llama/Llama-3.2-1B"
-  for MODEL in "meta-llama/Llama-3.1-8B-Instruct"
+  # for MODEL in "meta-llama/Llama-3.1-8B-Instruct"
   # for MODEL in "meta-llama/Llama-3.1-70B-Instruct" 
-  # for MODEL in "facebook/opt-6.7B"
+  for MODEL in "facebook/opt-6.7b"
   do
     CMD="--model $MODEL"
     CMD=$CMD" --percent 100 0 0 100 100 0"
@@ -21,6 +21,6 @@ do
     then
       CMD=$CMD # " --warmup-input-path ../test.txt --test-input-path ../test.txt --alpha 10 --partial-weight-ratio 0.1 --max-num-kv 8192"
     fi
-    python -m flexgen.flex_llama $CMD
+    python -m flexgen.flex_opt $CMD
   done
 done

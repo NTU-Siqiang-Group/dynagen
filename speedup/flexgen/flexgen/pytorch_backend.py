@@ -433,6 +433,7 @@ class TorchDevice:
             w_v = w_v.device.decompress(w_v)
             w_out = w_out.device.decompress(w_out)
 
+        attention_mask_cpu, attention_mask_cpu = None, None
         if isinstance(attention_mask, tuple):
             attention_mask_cpu, attention_mask_gpu = attention_mask
             src_s = attention_mask_cpu.shape[1]
@@ -480,8 +481,12 @@ class TorchDevice:
                 v = v.permute(1, 0, 2).reshape(b * n_head, src_s, head_dim)
 
                 if k.is_cuda:
+                    if attention_mask_gpu == None:
+                        attention_mask_gpu = attention_mask
                     value = self._attention_value(q, k, v, attention_mask_gpu.data, b, src_s, tgt_s, n_head, head_dim)
                 else:
+                    if attention_mask_cpu == None:
+                        attention_mask_cpu = attention_mask
                     q = q.float().cpu()
                     k, v = k.float(), v.float()
                     value = (

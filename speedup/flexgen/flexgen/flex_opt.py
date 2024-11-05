@@ -1337,9 +1337,11 @@ def get_inputs(prompt_len, num_prompts, tokenizer, path):
     prompts = []
     with open(path, "r") as file:
         prompts.append(file.read())
+    prompts = [prompts[0][: int(prompt_len * 4)]]
     input_ids = tokenizer(prompts, padding="max_length", max_length=prompt_len).input_ids
     input_ids[0] = input_ids[0][:prompt_len]
     return (input_ids[0],) * num_prompts
+
 
 def run_flexgen(args):
     if args.model == "facebook/galactica-30b":
@@ -1416,15 +1418,40 @@ def run_flexgen(args):
 
     projected = bool(args.debug_mode or cut_gen_len)
 
-    print("+++++++++++++++++++++++++++++++++++++++++++++++++")
-    if args.compress_cache:
-        print("FlexGen + INT4")
+    if DUMMY_WEIGHT not in args.path:
+        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+        show_str = "Outputs:\n" + 70 * "-" + "\n"
+        for i in [0]:
+            show_str += f"{i}: {outputs[i]}\n"
+            show_str += "-" * 70 + "\n"
+        if args.verbose >= 2:
+            print(show_str)
+
+    gpu.print_stats()
+    cpu.print_stats()
+    projected = bool(args.debug_mode or cut_gen_len)
+
+    if args.log_file == "auto":
+        filename = get_filename(args) + ".log"
     else:
-        print("FlexGen")
-    print("input: " + str(prompt_len) + " output: " + str(gen_len) + " bsz: " + str(num_prompts))
-    print("+++++++++++++++++++++++++++++++++++++++++++++++++")
-    print("Total: " + str(total_latency) + " Prefill: " + str(prefill_latency) + " Decode: " + str(decode_latency))
-    print("=================================================")
+        filename = args.log_file
+
+    log_str = write_benchmark_log(
+        filename,
+        opt_config.model_bytes(),
+        cache_size,
+        hidden_size,
+        gpu_peak_mem,
+        projected,
+        prefill_latency,
+        prefill_throughput,
+        decode_latency,
+        decode_throughput,
+        total_latency,
+        total_throughput,
+    )
+    if args.verbose >= 1:
+        print(log_str)
 
 
 def add_parser_arguments(parser):
@@ -1474,6 +1501,7 @@ def add_parser_arguments(parser):
 
     parser.add_argument("--warmup-input-path", type=str, default="./pg19_firstbook.txt")
     parser.add_argument("--test-input-path", type=str, default="./pg19_firstbook.txt")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
