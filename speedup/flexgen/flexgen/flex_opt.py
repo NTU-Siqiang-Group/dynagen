@@ -50,7 +50,7 @@ fix_recursive_import()
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=False)
 class Policy:
     gpu_batch_size: int
     num_gpu_batches: int
@@ -85,6 +85,8 @@ class Policy:
     # Compress KV cache with group-wise quantization
     compress_cache: bool
     comp_cache_config: CompressionConfig
+
+    computation_policy: str
 
     @property
     def w_disk_percent(self):
@@ -185,7 +187,7 @@ class InputEmbed:
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
 
-    def load_cache(self, cache_home, cache_read_buf, i):
+    def load_cache(self, cache_home, cache_read_buf, cpu_cache_compute, i):
         pass  # do nothing
 
     def store_cache(self, cache_home, cache_write_buf, i):
@@ -194,7 +196,9 @@ class InputEmbed:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len), np.int64
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(
+        self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, cpu_cache_compute, i, k
+    ):
         # Compute input embedding
         donate = [False] * 4
         h, donate[0] = hidden.val, True
@@ -252,7 +256,7 @@ class OutputEmbed:
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
 
-    def load_cache(self, cache_home, cache_read_buf, i):
+    def load_cache(self, cache_home, cache_read_buf, cpu_cache_compute, i):
         pass  # do nothing
 
     def store_cache(self, cache_home, cache_write_buf, i):
@@ -261,7 +265,9 @@ class OutputEmbed:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(
+        self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, cpu_cache_compute, i, k
+    ):
         donate = [False] * 4
         h, donate[0] = hidden.val, True
 
@@ -357,9 +363,10 @@ class SelfAttention:
         cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
         cache_home.store(cache)
 
-    def load_cache(self, cache_home, cache_read_buf, i):
+    def load_cache(self, cache_home, cache_read_buf, cpu_cache_compute, i):
         if i == 0:  # prefill, no cache
             return
+        self.attention_compute = self.env.cpu if cpu_cache_compute else self.env.gpu
 
         k_home, v_home = cache_home.val
 
@@ -368,7 +375,7 @@ class SelfAttention:
             path = 0
             dst = self.attention_compute.compressed_device
         else:
-            if self.policy.cpu_cache_compute:
+            if cpu_cache_compute:
                 if k_home.device.device_type == DeviceType.MIXED and k_home.data[0][0] is not None:
                     path = 2
                 else:
@@ -376,11 +383,10 @@ class SelfAttention:
             else:
                 path = 0
             dst = self.attention_compute
-
         if path == 0:  # Direct copy
             # shape: (s, b * n_head, head_dim)
             indices = (slice(0, self.task.prompt_len + i), slice(0, k_home.shape[1]))
-
+            # print(path, dst, k_home.device)
             if self.policy.attn_sparsity >= 1.0:
                 cache_read_buf.store(
                     (
@@ -398,6 +404,7 @@ class SelfAttention:
         elif path == 1:  # Copy to CPU temporary workspace
             # shape: (s, b * n_head, head_dim)
             k_buf, v_buf = dst.next_attention_compute_workspace()
+            # print(path, dst, k_home.device)
             indices = (slice(0, self.task.prompt_len + i - 1), slice(0, k_home.shape[1]))
             general_copy(k_buf, indices, k_home, indices)
 
@@ -460,7 +467,11 @@ class SelfAttention:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(
+        self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, cpu_cache_compute, i, k
+    ):
+        self.attention_compute = self.env.cpu if cpu_cache_compute else self.env.gpu
+
         n_head = self.config.n_head
 
         donate = [False] * 14
@@ -474,6 +485,7 @@ class SelfAttention:
                 mask_gpu, donate[1] = attention_mask.val.smart_copy(self.compute)
             else:
                 mask_gpu, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
+        # print(self.compute, self.attention_compute)
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (
@@ -605,7 +617,7 @@ class MLP:
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
 
-    def load_cache(self, cache_home, cache_read_buf, i):
+    def load_cache(self, cache_home, cache_read_buf, cpu_cache_compute, i):
         pass  # do nothing
 
     def store_cache(self, cache_home, cache_write_buf, i):
@@ -614,7 +626,9 @@ class MLP:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(
+        self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, cpu_cache_compute, i, k
+    ):
         donate = [False] * 7
         h, donate[0] = hidden.val, True
 
@@ -688,13 +702,15 @@ class OptLM:
         self.path = path
         self.policy = policy
         self.num_gpu_batches = policy.num_gpu_batches
-        self.computation_policy = get_computation_policy()
+        self.computation_policy = get_computation_policy(policy.computation_policy)
 
         layers = []
+        self.attn_index = []
         layers.append(InputEmbed(self.config, self.env, self.policy))
         for i in range(self.config.num_hidden_layers):
             if policy.sep_layer:
                 layers.append(SelfAttention(self.config, self.env, self.policy, i))
+                self.attn_index.append(len(layers) - 1)
                 layers.append(MLP(self.config, self.env, self.policy, i))
             else:
                 layers.append(TransformerLayer(self.config, self.env, self.policy, i))
@@ -714,6 +730,7 @@ class OptLM:
         # CUDA streams
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
+        self.load_cache_stream2 = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
 
         # Intermediate tensors
@@ -730,11 +747,7 @@ class OptLM:
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
         self.attention_mask_gpu = None
-        if (
-            self.policy.cpu_cache_compute
-            and self.policy.cache_cpu_percent < 100
-            and self.policy.cache_gpu_percent < 100
-        ):
+        if self.policy.cpu_cache_compute:
             self.attention_mask_gpu = array_1d(num_gpu_batches, ValueHolder)
 
         self.task = None
@@ -780,7 +793,7 @@ class OptLM:
     def init_cache(self, j, k):
         self.layers[j].init_cache_one_gpu_batch(self.cache_home[j][k])
 
-    def load_cache(self, i, j, k, overlap=True):
+    def load_cache(self, i, j, k, cpu_cache_compute, overlap=True):
         # Handle corner cases
         if i == 0:  # prefill, no cache
             return
@@ -795,10 +808,15 @@ class OptLM:
 
         # Load from cache_home to cache_read_buf
         if overlap:
-            with torch.cuda.stream(self.load_cache_stream):
-                self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
+            if cpu_cache_compute:
+                with torch.cuda.stream(self.load_cache_stream):
+                    # print("opt load cache:", j)
+                    self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], cpu_cache_compute, i)
+            else:
+                with torch.cuda.stream(self.load_cache_stream2):
+                    self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], cpu_cache_compute, i)
         else:
-            self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
+            self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], cpu_cache_compute, i)
 
     def store_cache(self, i, j, k, overlap=True):
         # Handle corner cases
@@ -883,7 +901,7 @@ class OptLM:
             if x.val:  # x may already be moved due to overlapping
                 x.val = x.val.move(self.act_home)
 
-    def compute_layer(self, i, j, k):
+    def compute_layer(self, i, j, k, cpu_cache_compute):
         # Update the hidden in place
         # Clear the weight_read_buf if it is the last gpu batch
         # Clear the cache_read_buf
@@ -898,6 +916,7 @@ class OptLM:
                 else self.attention_mask[k]
             ),
             self.cache_write_buf[j][k],
+            cpu_cache_compute,
             i,
             k,
         )
@@ -1378,6 +1397,7 @@ def run_flexgen(args):
         CompressionConfig(num_bits=4, group_size=64, group_dim=0, symmetric=False),
         args.compress_cache,
         CompressionConfig(num_bits=4, group_size=64, group_dim=2, symmetric=False),
+        args.computation_policy,
     )
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
@@ -1390,6 +1410,7 @@ def run_flexgen(args):
         output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
 
         timers("generate").reset()
+        model.policy.cpu_cache_compute = args.cpu_cache_compute
         output_ids = model.generate(
             inputs,
             max_new_tokens=args.gen_len,
@@ -1498,6 +1519,7 @@ def add_parser_arguments(parser):
     parser.add_argument("--profile-dir", type=str, default=None)
 
     parser.add_argument("--overlap", type=str2bool, nargs="?", const=True, default=True)
+    parser.add_argument("--computation-policy", type=str, default="default")
 
     parser.add_argument("--warmup-input-path", type=str, default="./pg19_firstbook.txt")
     parser.add_argument("--test-input-path", type=str, default="./pg19_firstbook.txt")

@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 
-class ComputationPolicyImpl(ComputationPolicyInterface):
+class ComputationAlterPolicyImpl(ComputationPolicyInterface):
     def generation_loop_normal(self, this, evaluate):
         for i in range(this.execute_gen_len):
             timers("generate").start()
@@ -128,10 +128,17 @@ class ComputationPolicyImpl(ComputationPolicyInterface):
                     timers("generate").start()
                     this.update_attention_mask(i, 0)
                     for j in range(this.num_layers):
+                        before_cpu_compute_attn = j + 1 in this.attn_index and this.attn_index.index(j + 1) % 2 == 0
+                        cpu_compute_attn = j in this.attn_index and this.attn_index.index(j) % 2 == 0
+                        if before_cpu_compute_attn:
+                            this.load_cache(i, j + 1, 0, True)
+                            this.load_cache(i, this.attn_index[this.attn_index.index(j + 1) + 1], 0, False)
                         this.load_weight(i, j + 1, 0)
-                        this.load_cache(i, j + 1, 0, this.policy.cpu_cache_compute)
                         this.load_hidden(i, j, 0)
-                        this.compute_layer(i, j, 0, this.policy.cpu_cache_compute)
+                        if cpu_compute_attn:
+                            this.compute_layer(i, j, 0, True)
+                        else:
+                            this.compute_layer(i, j, 0, False)
                         if evaluate and j == this.num_layers - 1:
                             this.sync()
                             break
@@ -148,10 +155,17 @@ class ComputationPolicyImpl(ComputationPolicyInterface):
                 timers("generate").start()
                 this.update_attention_mask(i, 0)
                 for j in range(this.num_layers):
+                    before_cpu_compute_attn = j + 1 in this.attn_index and this.attn_index.index(j + 1) % 2 == 0
+                    cpu_compute_attn = j in this.attn_index and this.attn_index.index(j) % 2 == 0
+                    if before_cpu_compute_attn:
+                        this.load_cache(i, j + 1, 0, True)
+                        this.load_cache(i, this.attn_index[this.attn_index.index(j + 1) + 1], 0, True)
                     this.load_weight(i, j + 1, 0)
-                    this.load_cache(i, j + 1, 0, this.policy.cpu_cache_compute)
                     this.load_hidden(i, j, 0)
-                    this.compute_layer(i, j, 0, this.policy.cpu_cache_compute)
+                    if cpu_compute_attn:
+                        this.compute_layer(i, j, 0, True)
+                    else:
+                        this.compute_layer(i, j, 0, True)
                     if evaluate and j == this.num_layers - 1:
                         this.sync()
                         break

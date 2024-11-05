@@ -8,8 +8,8 @@ do
   for MODEL in "facebook/opt-6.7b"
   do
     CMD="--model $MODEL"
-    CMD=$CMD" --percent 100 0 0 100 100 0"
-    CMD=$CMD" --gpu-batch-size 8 --num-gpu-batches 1 --prompt-len 2048 --gen-len 32 --cpu-cache-compute" # --profile-dir /fs/resource/ywp/llama_logs/"
+    CMD=$CMD" --percent 50 50 50 50 100 0"
+    CMD=$CMD" --gpu-batch-size 8 --num-gpu-batches 1 --prompt-len 2048 --gen-len 32 --cpu-cache-compute --computation-policy alter" # --profile-dir /fs/resource/ywp/llama_logs/"
     #--cpu-cache-compute
     if [ "$SCHEME" = "int4" ]
     then

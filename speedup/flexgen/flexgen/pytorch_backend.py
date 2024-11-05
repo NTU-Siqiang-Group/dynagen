@@ -433,12 +433,13 @@ class TorchDevice:
             w_v = w_v.device.decompress(w_v)
             w_out = w_out.device.decompress(w_out)
 
-        attention_mask_cpu, attention_mask_cpu = None, None
+        attention_mask_cpu, attention_mask_gpu = None, None
         if isinstance(attention_mask, tuple):
             attention_mask_cpu, attention_mask_gpu = attention_mask
             src_s = attention_mask_cpu.shape[1]
         else:
             src_s = attention_mask.shape[1]
+        # print(attention_mask,attention_mask_cpu)
 
         b, tgt_s, h = inputs.shape
         head_dim = h // n_head
@@ -479,7 +480,7 @@ class TorchDevice:
                 k = k.permute(1, 2, 0).reshape(b * n_head, head_dim, src_s)
                 # shape: (b * n_head, s, head_dim)
                 v = v.permute(1, 0, 2).reshape(b * n_head, src_s, head_dim)
-
+                # print(k.is_cuda)
                 if k.is_cuda:
                     if attention_mask_gpu == None:
                         attention_mask_gpu = attention_mask
@@ -489,6 +490,7 @@ class TorchDevice:
                         attention_mask_cpu = attention_mask
                     q = q.float().cpu()
                     k, v = k.float(), v.float()
+                    # print(q.device, attention_mask_cpu.device)
                     value = (
                         self._attention_value(q, k, v, attention_mask_cpu.data, b, src_s, tgt_s, n_head, head_dim)
                         .cuda()
@@ -500,7 +502,6 @@ class TorchDevice:
                 k[src_s - 1 : src_s] = k_new
                 # shape: (b * n_head, head_dim, s)
                 k = k.permute(1, 2, 0).reshape(b * n_head, head_dim, src_s)
-
                 if k.is_cuda:
                     value = self._sparse_attention_value(
                         q, k, v_new, v_cache, attention_mask.data, b, src_s, tgt_s, n_head, head_dim, attn_sparsity
@@ -515,6 +516,7 @@ class TorchDevice:
                         .half()
                     )
         else:  # Mixed device attention
+            # print("mixed", k_cache)
             assert attn_sparsity >= 1.0
             value = self._mixed_device_attention(
                 q,
@@ -611,7 +613,6 @@ class TorchDevice:
         v_gpu, v_cpu = v_cache[0].data, v_cache[1].data
         seg = k_gpu.shape[1]
         b_gpu = seg // n_head
-
         if isinstance(mask, tuple):
             mask_cpu, mask_gpu = mask
             mask_cpu = mask_cpu[b_gpu:]
