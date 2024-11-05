@@ -15,6 +15,7 @@ from tqdm import tqdm
 import torch
 from transformers import AutoTokenizer
 from flexgen.computation_policy import get_computation_policy
+from flexgen.computation_policy_streams import ComputationStreams
 
 from flexgen.compression import CompressionConfig
 from flexgen.opt_config import OptConfig, get_opt_config, download_opt_weights
@@ -688,7 +689,7 @@ class OptLM:
         self.path = path
         self.policy = policy
         self.num_gpu_batches = policy.num_gpu_batches
-        self.computation_policy = get_computation_policy()
+        self.computation_policy = get_computation_policy('stream')
 
         layers = []
         layers.append(InputEmbed(self.config, self.env, self.policy))
@@ -715,6 +716,8 @@ class OptLM:
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
+        
+        self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
 
         # Intermediate tensors
         # The following buffers store values used

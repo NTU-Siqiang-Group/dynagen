@@ -11,6 +11,7 @@ from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
 from flexgen.computation_policy import get_computation_policy
+from flexgen.computation_policy_streams import ComputationStreams
 from flexgen.pytorch_backend import (
     LlamaTorchDevice,
     TorchDisk,
@@ -318,7 +319,7 @@ class LlamaLM(OptLM):
         self.path = path
         self.policy = policy
         self.num_gpu_batches = policy.num_gpu_batches
-        self.computation_policy = get_computation_policy()
+        self.computation_policy = get_computation_policy(parser.parse_args().computation_policy)
 
         layers = []
         layers.append(LlamaInputEmbed(self.config, self.env, self.policy))
@@ -345,6 +346,8 @@ class LlamaLM(OptLM):
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
+        self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
+        
 
         # Intermediate tensors
         # The following buffers store values used
@@ -552,6 +555,7 @@ def add_parser_arguments(parser):
 
     parser.add_argument("--warmup-input-path", type=str, default="./pg19_firstbook.txt")
     parser.add_argument("--test-input-path", type=str, default="./pg19_firstbook.txt")
+    parser.add_argument("--computation-policy", type=str, default="default")
 
 
 if __name__ == "__main__":
