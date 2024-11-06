@@ -155,15 +155,19 @@ class ComputationAlterPolicyImpl(ComputationPolicyInterface):
                 timers("generate").start()
                 this.update_attention_mask(i, 0)
                 for j in range(this.num_layers):
+                    this.load_weight(i, j + 1, 0)
                     before_cpu_compute_attn = j + 1 in this.attn_index and this.attn_index.index(j + 1) % 2 == 0
                     cpu_compute_attn = j in this.attn_index and this.attn_index.index(j) % 2 == 0
+                    before_gpu_compute_attn = j + 1 in this.attn_index and this.attn_index.index(j + 1) % 2 == 1
+                    gpu_compute_attn = j in this.attn_index and this.attn_index.index(j) % 2 == 1
                     if before_cpu_compute_attn:
                         this.load_cache(i, j + 1, 0, True)
-                        this.load_cache(i, this.attn_index[this.attn_index.index(j + 1) + 1], 0, True)
-                    this.load_weight(i, j + 1, 0)
+                        this.load_cache(i, this.attn_index[this.attn_index.index(j + 1) + 1], 0, False)
+                    elif not before_gpu_compute_attn:
+                        this.load_cache(i, j + 1, 0, True)
                     this.load_hidden(i, j, 0)
-                    if cpu_compute_attn:
-                        this.compute_layer(i, j, 0, True)
+                    if gpu_compute_attn:
+                        this.compute_layer(i, j, 0, False)
                     else:
                         this.compute_layer(i, j, 0, True)
                     if evaluate and j == this.num_layers - 1:
@@ -171,6 +175,7 @@ class ComputationAlterPolicyImpl(ComputationPolicyInterface):
                         break
                     this.store_cache(i, j - 1, 0)
                     this.store_hidden(i, j, 0)
+                    # if cpu_compute_attn:
                     this.sync()
                 timers("generate").stop()
 
@@ -201,6 +206,11 @@ class ComputationAlterPolicyImpl(ComputationPolicyInterface):
                     for j in range(this.num_layers):
                         for k in range(this.num_gpu_batches):
                             this.load_weight(i, j + 1, k)
+                            before_cpu_compute_attn = j + 1 in this.attn_index and this.attn_index.index(j + 1) % 2 == 0
+                            cpu_compute_attn = j in this.attn_index and this.attn_index.index(j) % 2 == 0
+                            if before_cpu_compute_attn:
+                                this.load_cache(i, j + 1, 0, True)
+                                this.load_cache(i, this.attn_index[this.attn_index.index(j + 1) + 1], 0, False)
                             this.load_cache(i, j, k + 1)
                             this.store_hidden(i, j, k - 1)
                             this.load_hidden(i, j, k + 1)

@@ -809,9 +809,9 @@ class OptLM:
         # Load from cache_home to cache_read_buf
         if overlap:
             if cpu_cache_compute:
-                with torch.cuda.stream(self.load_cache_stream):
-                    # print("opt load cache:", j)
-                    self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], cpu_cache_compute, i)
+                # with torch.cuda.stream(self.load_cache_stream):
+                # print("opt load cache:", j)
+                self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], cpu_cache_compute, i)
             else:
                 with torch.cuda.stream(self.load_cache_stream2):
                     self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], cpu_cache_compute, i)
@@ -923,6 +923,10 @@ class OptLM:
 
     def sync(self):
         self.env.disk.synchronize()
+        # self.store_cache_stream.synchronize()
+        # self.load_cache_stream.synchronize()
+        # self.load_weight_stream.synchronize()
+        # self.load_cache_stream2.synchronize()
         torch.cuda.synchronize()
 
     def init_all_weights(self):

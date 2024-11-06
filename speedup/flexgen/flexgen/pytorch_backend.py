@@ -480,7 +480,7 @@ class TorchDevice:
                 k = k.permute(1, 2, 0).reshape(b * n_head, head_dim, src_s)
                 # shape: (b * n_head, s, head_dim)
                 v = v.permute(1, 0, 2).reshape(b * n_head, src_s, head_dim)
-                # print(k.is_cuda)
+                # print("cuda", k.is_cuda)
                 if k.is_cuda:
                     if attention_mask_gpu == None:
                         attention_mask_gpu = attention_mask
