@@ -44,7 +44,7 @@ from flexgen.utils import (
 fix_recursive_import()
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
-
+auto_pop = False
 
 class LlamaInputEmbed(InputEmbed):
     def __init__(self, config, env, policy):
@@ -66,7 +66,8 @@ class LlamaInputEmbed(InputEmbed):
         if k == 0:
             dst = self.weight_load_dst
             weight_read_buf.store((w_token.smart_copy(dst),))
-
+    def pop_weight(self, weight_read_buf):
+        weight_read_buf.pop()
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         # Compute input embedding
         donate = [False] * 3
@@ -77,7 +78,7 @@ class LlamaInputEmbed(InputEmbed):
             donate[1] = False
         else:
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             ((w_token, donate[2]),) = weight_read_buf.pop()
         else:
@@ -110,12 +111,13 @@ class LlamaOutputEmbed(OutputEmbed):
             dst1 = self.weight_load_dst
             dst2 = self.compute
             weight_read_buf.store((w_ln.smart_copy(dst2), w_token.smart_copy(dst1)))
-
+    def pop_weight(self, weight_read_buf):
+        weight_read_buf.pop()
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 3
         h, donate[0] = hidden.val, True
 
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (w_ln, donate[1]), (w_token, donate[2]) = weight_read_buf.pop()
         else:
@@ -179,6 +181,8 @@ class LlamaSelfAttention(SelfAttention):
                     w_o.smart_copy(dst1),
                 )
             )
+    def pop_weight(self, weight_read_buf):
+        weight_read_buf.pop()
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         n_head = self.config.n_head
@@ -195,7 +199,7 @@ class LlamaSelfAttention(SelfAttention):
                 mask_gpu, donate[1] = attention_mask.val.smart_copy(self.compute)
             else:
                 mask_gpu, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (
                 (w_ln, donate[2]),
@@ -287,12 +291,15 @@ class LlamaMLP(MLP):
             weight_read_buf.store(
                 (w_ln.smart_copy(dst2), w_g.smart_copy(dst1), w_u.smart_copy(dst1), w_d.smart_copy(dst1))
             )
+    
+    def pop_weight(self, weight_read_buf):
+        weight_read_buf.pop()
+        
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 5
         h, donate[0] = hidden.val, True
-
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             ((w_ln, donate[1]), (w_g, donate[2]), (w_u, donate[3]), (w_d, donate[4])) = weight_read_buf.pop()
         else:
@@ -563,6 +570,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     add_parser_arguments(parser)
     args = parser.parse_args()
+    auto_pop = args.computation_policy == "default"
 
     assert len(args.percent) == 6
 

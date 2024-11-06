@@ -770,7 +770,14 @@ class OptLM:
                 self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
         else:
             self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
-
+    def pop_weight(self, i, j, k):
+      if j == self.num_layers:
+            j = 0
+            i += 1
+            if i == self.execute_gen_len:
+                return
+      self.layers[j].pop_weight(self.weight_read_buf[j])
+      
     def delete_weight(self, j, k):
         if k == 0:
             for x in self.weight_home[j].pop():
