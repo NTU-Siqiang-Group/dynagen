@@ -160,6 +160,7 @@ class InputEmbed:
         self.weight_load_dst = self.compute.compressed_device if policy.compress_weight else self.compute
 
         self.task = None
+        self.need_cache = False
 
     def set_task(self, task):
         self.task = task
@@ -188,6 +189,9 @@ class InputEmbed:
 
     def load_cache(self, cache_home, cache_read_buf, i):
         pass  # do nothing
+    
+    def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
+        pass
 
     def store_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
@@ -224,6 +228,7 @@ class OutputEmbed:
         self.weight_load_dst = self.compute.compressed_device if policy.compress_weight else self.compute
 
         self.task = None
+        self.need_cache = False
 
     def set_task(self, task):
         self.task = task
@@ -258,6 +263,9 @@ class OutputEmbed:
 
     def store_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
+    
+    def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
+        pass
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
@@ -289,6 +297,7 @@ class SelfAttention:
         self.attention_compute = self.env.cpu if self.policy.cpu_cache_compute else self.env.gpu
 
         self.task = None
+        self.need_cache = True
 
     def set_task(self, task):
         self.task = task
@@ -357,6 +366,90 @@ class SelfAttention:
 
         cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
         cache_home.store(cache)
+    
+    def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
+        if i == 0:  # prefill, no cache
+            return
+
+        k_home, v_home = cache_home.val
+
+        # Pick code path
+        if self.policy.compress_cache:
+            path = 0
+            dst = self.attention_compute.compressed_device
+        else:
+            if load_to_cpu:
+                if k_home.device.device_type == DeviceType.MIXED and k_home.data[0][0] is not None:
+                    path = 2
+                else:
+                    path = 1
+                dst = self.env.cpu
+            else:
+                path = 0
+                dst = self.env.gpu
+
+        if path == 0:  # Direct copy
+            # shape: (s, b * n_head, head_dim)
+            indices = (slice(0, self.task.prompt_len + i), slice(0, k_home.shape[1]))
+
+            if self.policy.attn_sparsity >= 1.0:
+                cache_read_buf.store(
+                    (
+                        k_home.smart_copy(dst, indices),
+                        v_home.smart_copy(dst, indices),
+                    )
+                )
+            else:
+                cache_read_buf.store(
+                    (
+                        k_home.smart_copy(dst, indices),
+                        (v_home, False),
+                    )
+                )
+        elif path == 1:  # Copy to CPU temporary workspace
+            # shape: (s, b * n_head, head_dim)
+            k_buf, v_buf = dst.next_attention_compute_workspace()
+            indices = (slice(0, self.task.prompt_len + i - 1), slice(0, k_home.shape[1]))
+            general_copy(k_buf, indices, k_home, indices)
+
+            if self.policy.attn_sparsity >= 1.0:
+                general_copy(v_buf, indices, v_home, indices)
+                cache_read_buf.store(((k_buf, False), (v_buf, False)))
+            else:
+                cache_read_buf.store(((k_buf, False), ((v_home, v_buf), False)))
+        elif path == 2:  # Copy to both GPU and CPU
+            # The caches are stored on both GPU and other devices.
+            # Compute attention on gpu for caches stored on gpu.
+            # Compute attention on cpu for caches stored on cpu/disk.
+            gpu_k_buf = k_home.data[0][0]
+            gpu_v_buf = v_home.data[0][0]
+
+            # shape: (s, b * n_head, head_dim)
+            k_buf, v_buf = dst.next_attention_compute_workspace()
+            indices = (slice(0, self.task.prompt_len + i - 1), slice(gpu_k_buf.shape[1], k_home.shape[1]))
+            general_copy(k_buf, indices, k_home, indices)
+            general_copy(v_buf, indices, v_home, indices)
+            cache_read_buf.store(
+                (
+                    (
+                        (
+                            gpu_k_buf,
+                            k_buf,
+                        ),
+                        False,
+                    ),
+                    (
+                        (
+                            gpu_v_buf,
+                            v_buf,
+                        ),
+                        False,
+                    ),
+                )
+            )
+            assert self.policy.attn_sparsity >= 1.0
+        else:
+            raise ValueError(f"Invalid path: {path}")
 
     def load_cache(self, cache_home, cache_read_buf, i):
         if i == 0:  # prefill, no cache
@@ -461,9 +554,12 @@ class SelfAttention:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, cpu_delegation=None):
         n_head = self.config.n_head
-
+        if not cpu_delegation is None:
+          attention_compute = self.env.cpu if cpu_delegation else self.env.gpu
+        else:
+          attention_compute = self.attention_compute
         donate = [False] * 14
         h, donate[0] = hidden.val, True
         if isinstance(attention_mask, tuple):
@@ -474,7 +570,7 @@ class SelfAttention:
             if i == 0:
                 mask_gpu, donate[1] = attention_mask.val.smart_copy(self.compute)
             else:
-                mask_gpu, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
+                mask_gpu, donate[1] = attention_mask.val.smart_copy(attention_compute)
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (
@@ -563,6 +659,7 @@ class MLP:
         self.weight_load_dst = self.compute.compressed_device if policy.compress_weight else self.compute
 
         self.task = None
+        self.need_cache = False
 
     def set_task(self, task):
         self.task = task
@@ -608,7 +705,10 @@ class MLP:
 
     def load_cache(self, cache_home, cache_read_buf, i):
         pass  # do nothing
-
+    
+    def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
+        pass
+    
     def store_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
 
@@ -809,6 +909,22 @@ class OptLM:
                 self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
         else:
             self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
+    
+    def load_cache_dyn(self, i, j, k, load_to_cpu=False):
+        if not self.layers[j].need_cache:
+            return self.load_cache(i, j, k, False)
+        if i == 0:  # prefill, no cache
+            return
+        if k == self.num_gpu_batches:
+            k = 0
+            j += 1
+        if j == self.num_layers:
+            j = 0
+            i += 1
+            if i == self.execute_gen_len:
+                return
+        self.layers[j].load_cache_dyn(self.cache_home[j][k], self.cache_read_buf[j][k], i, load_to_cpu)
+
 
     def store_cache(self, i, j, k, overlap=True):
         # Handle corner cases
@@ -893,12 +1009,13 @@ class OptLM:
             if x.val:  # x may already be moved due to overlapping
                 x.val = x.val.move(self.act_home)
 
-    def compute_layer(self, i, j, k):
+    def compute_layer(self, i, j, k, cpu_delegation=None):
         # Update the hidden in place
         # Clear the weight_read_buf if it is the last gpu batch
         # Clear the cache_read_buf
         # Run layer computation
-        self.layers[j].forward(
+        if self.layers[j].need_cache and cpu_delegation is not None:
+            self.layers[j].forward(
             self.hidden[i][j][k],
             self.cache_read_buf[j][k],
             self.weight_read_buf[j],
@@ -910,7 +1027,22 @@ class OptLM:
             self.cache_write_buf[j][k],
             i,
             k,
+            cpu_delegation
         )
+        else:
+          self.layers[j].forward(
+              self.hidden[i][j][k],
+              self.cache_read_buf[j][k],
+              self.weight_read_buf[j],
+              (
+                  (self.attention_mask[k], self.attention_mask_gpu[k])
+                  if self.attention_mask_gpu
+                  else self.attention_mask[k]
+              ),
+              self.cache_write_buf[j][k],
+              i,
+              k,
+          )
 
     def sync(self):
         self.env.disk.synchronize()
@@ -1060,262 +1192,22 @@ class OptLM:
         return self.output_ids
 
     def generation_loop_normal(self, evaluate):
-        # for i in range(self.execute_gen_len):
-        #     timers("generate").start()
-        #     for k in range(self.num_gpu_batches):
-        #         self.update_attention_mask(i, k)
-        #     for j in range(self.num_layers):
-        #         for k in range(self.num_gpu_batches):
-        #             self.load_weight(i, j, k, overlap=False)
-
-        #         for k in range(self.num_gpu_batches):
-        #             self.load_cache(i, j, k, overlap=False)
-        #             self.load_hidden(i, j, k)
-        #             self.compute_layer(i, j, k)
-        #             if evaluate and j == self.num_layers - 1:
-        #                 self.sync()
-        #                 break
-        #             self.sync()
-        #             self.store_hidden(i, j, k)
-        #             self.store_cache(i, j, k, overlap=False)
-        #     timers("generate").stop()
         self.computation_policy.generation_loop_normal(self, evaluate)
 
     def generation_loop_debug_normal(self):
         self.computation_policy.generation_loop_debug_normal(self)
-        # execute_num_batches = 20
-        # batch_ct = 0
-        # pbar = tqdm(total=execute_num_batches)
-        # timers("prefill_total").reset()
-        # timers("decoding_gpu_batch").reset()
-
-        # timers("load_weight").reset()
-        # timers("load_cache_prefill").reset()
-        # timers("load_cache_decoding").reset()
-        # timers("store_cache_prefill").reset()
-        # timers("store_cache_decoding").reset()
-        # timers("compute_layer_prefill").reset()
-        # timers("compute_layer_decoding").reset()
-        # load_weight_timer = timers("load_weight")
-
-        # for i in range(self.execute_gen_len):
-        #     if i == 0:
-        #         timers("prefill_total").start()
-        #         load_cache_timer = timers("load_cache_prefill")
-        #         store_cache_timer = timers("store_cache_prefill")
-        #         compute_layer_timer = timers("compute_layer_prefill")
-        #     else:
-        #         load_cache_timer = timers("load_cache_decoding")
-        #         store_cache_timer = timers("store_cache_decoding")
-        #         compute_layer_timer = timers("compute_layer_decoding")
-
-        #     for k in range(self.num_gpu_batches):
-        #         self.update_attention_mask(i, k)
-
-        #     for j in range(self.num_layers):
-        #         if i > 0:
-        #             timers("decoding_gpu_batch").start()
-
-        #         load_weight_timer.start(self.sync)
-        #         for k in range(self.num_gpu_batches):
-        #             self.load_weight(i, j, k)
-        #         load_weight_timer.stop(self.sync)
-
-        #         for k in range(self.num_gpu_batches):
-        #             load_cache_timer.start(self.sync)
-        #             self.load_cache(i, j, k)
-        #             load_cache_timer.stop(self.sync)
-        #             self.load_hidden(i, j, k)
-        #             compute_layer_timer.start(self.sync)
-        #             self.compute_layer(i, j, k)
-        #             compute_layer_timer.stop(self.sync)
-        #             self.store_hidden(i, j, k)
-        #             store_cache_timer.start(self.sync)
-        #             self.store_cache(i, j, k)
-        #             store_cache_timer.stop(self.sync)
-
-        #         if i > 0:
-        #             timers("decoding_gpu_batch").stop()
-        #             pbar.update(1)
-        #             batch_ct += 1
-        #         if batch_ct >= execute_num_batches:
-        #             break
-        #     if batch_ct >= execute_num_batches:
-        #         break
-        #     if i == 0:
-        #         timers("prefill_total").stop(self.sync)
-
-        # # Convert "decoding_gpu_batch" timer to "generate" timer
-        # batch_cost = np.mean(timers("decoding_gpu_batch").costs[10:])
-        # for i in range(self.execute_gen_len):
-        #     if i == 0:
-        #         timers("generate").costs.append(timers("prefill_total").costs[0])
-        #     else:
-        #         timers("generate").costs.append(self.num_layers * batch_cost)
-
-        # # Debug the costs of individual functions
-        # print(f"#layers: {self.num_layers}")
-
-        # print(f"#batches prefill:  " f"{self.num_layers * self.num_gpu_batches}")
-        # print(f"#batches decoding: " f"{(self.task.gen_len - 1) * self.num_layers * self.num_gpu_batches}")
-        # print(f"load_weight            (per-layer)" f": {np.mean(timers('load_weight').costs):.6f} s")
-        # for stage in ["prefill", "decoding"]:
-        #     for func in ["load_cache", "store_cache", "compute_layer"]:
-        #         name = func + "_" + stage
-        #         costs = timers(name).costs
-        #         print(f"{name:22s} (per-batch): {np.mean(costs):.6f} s")
 
     def generation_loop_overlap_single_batch(self, evaluate, profile_dir=None):
-        # # Prologue
-        # self.load_weight(0, 0, 0)
-        # self.sync()
-
-        # # Generate
-        # for i in tqdm(range(self.execute_gen_len)):
-        #     timers("generate").start()
-        #     self.update_attention_mask(i, 0)
-        #     for j in range(self.num_layers):
-        #         self.load_weight(i, j + 1, 0)
-        #         self.load_cache(i, j + 1, 0)
-        #         self.load_hidden(i, j, 0)
-        #         self.compute_layer(i, j, 0)
-        #         if evaluate and j == self.num_layers - 1:
-        #             self.sync()
-        #             break
-        #         self.store_cache(i, j - 1, 0)
-        #         self.store_hidden(i, j, 0)
-        #         self.sync()
-        #     timers("generate").stop()
-
-        #     if self.task.stop and np.all(self.stopped):
-        #         break
         self.computation_policy.generation_loop_overlap_single_batch(self, evaluate, profile_dir)
 
     def generation_loop_overlap_multi_batch(self, profile_dir=None):
         self.computation_policy.generation_loop_overlap_multi_batch(self, profile_dir)
-        # # Prologue
-        # for k in range(self.num_gpu_batches):
-        #     self.load_weight(0, 0, k)
-        # self.load_hidden(0, 0, 0)
-        # self.sync()
-
-        # # Generate
-        # for i in tqdm(range(self.execute_gen_len)):
-        #     timers("generate").start()
-        #     for k in range(self.num_gpu_batches):
-        #         self.update_attention_mask(i, k)
-        #     for j in range(self.num_layers):
-        #         for k in range(self.num_gpu_batches):
-        #             self.load_weight(i, j + 1, k)
-        #             self.load_cache(i, j, k + 1)
-        #             self.store_hidden(i, j, k - 1)
-        #             self.load_hidden(i, j, k + 1)
-        #             self.compute_layer(i, j, k)
-        #             self.store_cache(i, j, k - 1)
-        #             self.sync()
-        #     timers("generate").stop()
-
-        # # Epilogue
-        # self.store_hidden(self.execute_gen_len - 1, self.num_layers - 1, self.num_gpu_batches - 1)
 
     def generation_loop_debug_single_batch(self):
         self.computation_policy.generation_loop_debug_single_batch(self)
-        # execute_num_batches = 20
-        # batch_ct = 0
-        # pbar = tqdm(total=execute_num_batches)
-        # timers("prefill").reset()
-        # timers("decoding_gpu_batch").reset()
-
-        # # Prologue
-        # for k in range(self.num_gpu_batches):
-        #     self.load_weight(0, 0, k)
-        # self.sync()
-
-        # # Generate
-        # for i in range(self.execute_gen_len):
-        #     if i == 0:
-        #         timers("prefill").start()
-        #     self.update_attention_mask(i, 0)
-        #     for j in range(self.num_layers):
-        #         if i > 0:
-        #             timers("decoding_gpu_batch").start()
-        #         self.load_weight(i, j + 1, 0)
-        #         self.load_cache(i, j + 1, 0)
-        #         self.load_hidden(i, j, 0)
-        #         self.compute_layer(i, j, 0)
-        #         self.store_cache(i, j - 1, 0)
-        #         self.store_hidden(i, j, 0)
-        #         self.sync()
-
-        #         if i > 0:
-        #             timers("decoding_gpu_batch").stop()
-        #             pbar.update(1)
-        #             batch_ct += 1
-        #         if batch_ct >= execute_num_batches:
-        #             break
-        #     if batch_ct >= execute_num_batches:
-        #         break
-        #     if i == 0:
-        #         timers("prefill").stop()
-
-        # # Convert "decoding_gpu_batch" timer to "generate" timer
-        # batch_cost = np.mean(timers("decoding_gpu_batch").costs[10:])
-        # for i in range(self.execute_gen_len):
-        #     if i == 0:
-        #         timers("generate").costs.append(timers("prefill").costs[0])
-        #     else:
-        #         timers("generate").costs.append(self.num_layers * batch_cost)
 
     def generation_loop_debug_multi_batch(self):
         self.computation_policy.generation_loop_debug_multi_batch(self)
-        # execute_num_batches = 20
-        # batch_ct = 0
-        # pbar = tqdm(total=execute_num_batches)
-        # timers("prefill").reset()
-        # timers("decoding_gpu_batch").reset()
-
-        # # Prologue
-        # for k in range(self.num_gpu_batches):
-        #     self.load_weight(0, 0, k)
-        # self.load_hidden(0, 0, 0)
-        # self.sync()
-
-        # # Generate
-        # for i in range(self.execute_gen_len):
-        #     if i == 0:
-        #         timers("prefill").start()
-        #     for k in range(self.num_gpu_batches):
-        #         self.update_attention_mask(i, k)
-        #     for j in range(self.num_layers):
-        #         if i > 0:
-        #             timers("decoding_gpu_batch").start()
-        #         for k in range(self.num_gpu_batches):
-        #             self.load_weight(i, j + 1, k)
-        #             self.load_cache(i, j, k + 1)
-        #             self.store_hidden(i, j, k - 1)
-        #             self.load_hidden(i, j, k + 1)
-        #             self.compute_layer(i, j, k)
-        #             self.store_cache(i, j, k - 1)
-        #             self.sync()
-
-        #         if i > 0:
-        #             timers("decoding_gpu_batch").stop()
-        #             pbar.update(1)
-        #             batch_ct += 1
-        #         if batch_ct >= execute_num_batches:
-        #             break
-        #     if batch_ct >= execute_num_batches:
-        #         break
-        #     if i == 0:
-        #         timers("prefill").stop()
-
-        # # Convert "decoding_gpu_batch" timer to "generate" timer
-        # batch_cost = np.mean(timers("decoding_gpu_batch").costs[10:])
-        # for i in range(self.execute_gen_len):
-        #     if i == 0:
-        #         timers("generate").costs.append(timers("prefill").costs[0])
-        #     else:
-        #         timers("generate").costs.append(self.num_layers * batch_cost)
 
     def __del__(self):
         self.delete_all_weights()
