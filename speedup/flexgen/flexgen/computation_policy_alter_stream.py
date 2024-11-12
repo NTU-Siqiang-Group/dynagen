@@ -59,14 +59,13 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
       this.pop_weight(i, j, 0)
     
     for i in tqdm(range(this.execute_gen_len)):
-      timers("generate").start()
+      timers("generate").start()                    
       this.update_attention_mask(i, 0)
       layers_weights_sync = [None for _ in range(this.num_layers)]
       layers_cache_sync = [None for _ in range(this.num_layers)]
       f = this.cache_loader.load_cache(0, load_layer_weight, i, 0, this.cpu_del[0])
       layers_weights_sync[0] = f
       for j in range(this.num_layers):
-        compute_f = None
         if this.layers[j].need_cache and this.cpu_del[j]:
           # attention layer and CPU delegation
           # find the next cpu delegation layer
@@ -84,10 +83,11 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
               f = this.cache_loader.load_cache(k % this.cache_loader.size, load_layer_cache, i, k, 0, this.cpu_del[k])
               layers_cache_sync[k] = f
           # compute this layer
-          compute_f = this.stream_manager.compute(j % this.stream_manager.size, compute_layer, i, j, layers_weights_sync[j], layers_cache_sync[j])
+          compute_layer(i, j, layers_weights_sync[j], layers_cache_sync[j])
         else:
           # GPU attention, MLP, input, or output layer
-          compute_f = this.stream_manager.compute(j % this.stream_manager.size, compute_layer, i, j, layers_weights_sync[j], layers_cache_sync[j])
+          # computation in the current thread
+          compute_layer(i, j, layers_weights_sync[j], layers_cache_sync[j])
           # next layer's weight & cache
           if j + 1 < this.num_layers and layers_weights_sync[j + 1] is None:
             f = this.cache_loader.load_cache((j + 1) % this.cache_loader.size, load_layer_weight, i, j + 1, this.cpu_del[j + 1])
@@ -95,10 +95,7 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
             if this.layers[j + 1].need_cache:
               f = this.cache_loader.load_cache((j + 1) % this.cache_loader.size, load_layer_cache, i, j + 1, 0, this.cpu_del[j + 1])
               layers_cache_sync[j + 1] = f
-          
-        # wait for compute
-        wait_stream_finish(compute_f)
-    
+
       timers("generate").stop()
 
   
