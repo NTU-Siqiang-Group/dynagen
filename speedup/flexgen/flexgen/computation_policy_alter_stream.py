@@ -12,10 +12,12 @@ def wait_stream_finish(f):
 class CacheLoaderManager:
   def __init__(self, size):
     self.size = size
+    self.streams = [torch.cuda.Stream() for _ in range(size)]
     self.executors = ThreadPoolExecutor(max_workers=size)
   
   def load_cache(self, i, func, *args):
     def _run_func():
+      torch.cuda.set_stream(self.streams[i])
       func(*args)
     
     return self.executors.submit(_run_func)
@@ -23,10 +25,12 @@ class CacheLoaderManager:
 class ComputationStreamAlterManager:
   def __init__(self, size):
     self.size = size
+    self.streams = [torch.cuda.Stream() for _ in range(size)]
     self.executors = ThreadPoolExecutor(max_workers=size)
   
   def compute(self, i, func, *args):
     def _run_func():
+      torch.cuda.set_stream(self.streams[i])
       func(*args)
 
     return self.executors.submit(_run_func)
@@ -53,9 +57,9 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
       this.store_cache(i, j, 0, overlap=False)
       this.store_hidden(i, j, 0)
       this.pop_weight(i, j, 0)
-    timers("generate").start()
     
     for i in tqdm(range(this.execute_gen_len)):
+      timers("generate").start()
       this.update_attention_mask(i, 0)
       layers_weights_sync = [None for _ in range(this.num_layers)]
       layers_cache_sync = [None for _ in range(this.num_layers)]
@@ -95,8 +99,9 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
         # wait for compute
         wait_stream_finish(compute_f)
     
-    timers("generate").stop()
+      timers("generate").stop()
 
   
   def generation_loop_overlap_multi_batch(self, this, profile_dir):
+    timers("generate").start()
     raise NotImplementedError()
