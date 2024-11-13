@@ -912,7 +912,7 @@ class OptLM:
     
     def load_cache_dyn(self, i, j, k, load_to_cpu=False):
         if not self.layers[j].need_cache:
-            return self.load_cache(i, j, k, False)
+            return
         if i == 0:  # prefill, no cache
             return
         if k == self.num_gpu_batches:

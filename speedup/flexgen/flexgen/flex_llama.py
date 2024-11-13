@@ -353,7 +353,7 @@ class LlamaLM(OptLM):
             if isinstance(self.layers[i], LlamaSelfAttention):
                 idx += 1
                 if idx % 2 == 0:
-                    self.cpu_del[i] = 1
+                    self.cpu_del[i] = 0
 
         if self.policy.act_gpu_percent == 100:
             self.act_home = self.env.gpu
@@ -371,8 +371,8 @@ class LlamaLM(OptLM):
         if parser.parse_args().computation_policy == 'stream':
           self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
         elif parser.parse_args().computation_policy == 'alter_stream':
-          self.stream_manager = ComputationStreamAlterManager(32)
-          self.cache_loader = CacheLoaderManager(32)
+          self.stream_manager = ComputationStreamAlterManager(2)
+          self.cache_loader = CacheLoaderManager(2)
 
         # Intermediate tensors
         # The following buffers store values used
