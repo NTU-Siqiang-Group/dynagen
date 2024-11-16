@@ -176,7 +176,8 @@ class ComputationAlterPolicyImpl(ComputationPolicyInterface):
                     this.store_cache(i, j - 1, 0)
                     this.store_hidden(i, j, 0)
                     # if cpu_compute_attn:
-                    this.sync()
+                    if i == 0:
+                        this.sync()
                 timers("generate").stop()
 
                 if this.task.stop and np.all(this.stopped):
