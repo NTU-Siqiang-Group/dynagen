@@ -53,19 +53,20 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
   
   def generation_loop_overlap_single_batch(self, this, evaluate, profile_dir):
     def load_layer_weight(i, j, load_to_cpu=False):
-      this.load_weight(i, j, 0, overlap=False)
+      this.load_weight(i, j, 0)
     
     def load_layer_cache(i, j, k, load_to_cpu=False):
       this.load_cache_dyn(i, j, k, load_to_cpu=load_to_cpu)
       
     def compute_layer(i, j, weight_handle, cache_handle):
+      wait_stream_finish(weight_handle)
       if this.layers[j].need_cache:
         wait_stream_finish(cache_handle, True)
         
       cpu_del = this.cpu_del[j]
       this.load_hidden(i, j, 0)
       this.compute_layer(i, j, 0, cpu_delegation=cpu_del)
-      this.store_cache(i, j - 1, 0, overlap=False)
+      this.store_cache(i, j - 1, 0)
       this.store_hidden(i, j, 0)
       this.pop_weight(i, j, 0)
     
@@ -77,7 +78,7 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
       f = this.cache_loader.load_cache(load_layer_weight, i, 0, this.cpu_del[0])
       layers_weights_sync[0] = f
       for j in range(this.num_layers):
-        layers_weights_sync[j].result()
+        # layers_weights_sync[j].result()
         if this.layers[j].need_cache and this.cpu_del[j]:
           # attention layer and CPU delegation
           # find the next cpu delegation layer
@@ -106,7 +107,8 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
               layers_cache_sync[j + 1] = f
 
         compute_layer(i, j, layers_weights_sync[j], layers_cache_sync[j])
-        torch.cuda.current_stream().synchronize()
+        if i==0:
+          this.sync()
 
       timers("generate").stop()
 

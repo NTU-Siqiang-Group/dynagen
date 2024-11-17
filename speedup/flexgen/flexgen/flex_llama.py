@@ -351,9 +351,9 @@ class LlamaLM(OptLM):
         self.cpu_del = torch.zeros(self.num_layers)
         for i in range(self.num_layers):
             if isinstance(self.layers[i], LlamaSelfAttention):
-                idx += 1
                 if idx % 2 == 0:
-                    self.cpu_del[i] = 0
+                    self.cpu_del[i] = 1
+                idx += 1
 
         if self.policy.act_gpu_percent == 100:
             self.act_home = self.env.gpu
