@@ -78,37 +78,46 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
       f = this.cache_loader.load_cache(load_layer_weight, i, 0, this.cpu_del[0])
       layers_weights_sync[0] = f
       for j in range(this.num_layers):
+          # print(j,"="*20)
         # layers_weights_sync[j].result()
-        if this.layers[j].need_cache and this.cpu_del[j]:
-          # attention layer and CPU delegation
-          # find the next cpu delegation layer
-          next_cpu_del = None
-          for k in range(j + 1, this.num_layers):
-            if this.cpu_del[k]:
-              next_cpu_del = k
-              break
-          end = next_cpu_del if not next_cpu_del is None else this.num_layers
+        # if j < this.num_layers-1 and not(this.cpu_del[j+1]==0 and this.layers[j+1].need_cache):
+        #   # attention layer and CPU delegation
+        #   # find the next cpu delegation layer
+        #   next_gpu_del = None
+        #   for k in range(j + 1, this.num_layers):
+        #     if not this.cpu_del[k] and this.layers[k].need_cache:
+        #       next_gpu_del = k
+        #       break
+        #   end = next_gpu_del if not next_gpu_del is None else this.num_layers
           # load weight and cache
-          for k in range(j + 1, end):
-            f = this.cache_loader.load_cache(load_layer_weight, i, k, this.cpu_del[k])
-            layers_weights_sync[k] = f
-            if this.layers[k].need_cache:
+          for k in range(j + 1, min(j + 3, this.num_layers)):
+            if layers_weights_sync[k] is None:
+              # print("load weight",k)
+              f = this.cache_loader.load_cache(load_layer_weight, i, k, this.cpu_del[k])
+              layers_weights_sync[k] = f
+              # if this.layers[k].need_cache:
+              #   print("load cache",k)
               f = this.cache_loader.load_cache(load_layer_cache, i, k, 0, this.cpu_del[k])
               layers_cache_sync[k] = f
-        else:
+        # else:
           # GPU attention, MLP, input, or output layer
           # computation in the current thread
           # next layer's weight & cache
-          if j + 1 < this.num_layers and layers_weights_sync[j + 1] is None:
-            f = this.cache_loader.load_cache(load_layer_weight, i, j + 1, this.cpu_del[j + 1])
-            layers_weights_sync[j + 1] = f
-            if this.layers[j + 1].need_cache:
-              f = this.cache_loader.load_cache(load_layer_cache, i, j + 1, 0, this.cpu_del[j + 1])
-              layers_cache_sync[j + 1] = f
+          # if j + 1 < this.num_layers and layers_weights_sync[j + 1] is None:
+          #   print("load weight",j+1)
+          #   f = this.cache_loader.load_cache(load_layer_weight, i, j + 1, this.cpu_del[j + 1])
+          #   layers_weights_sync[j + 1] = f
+            
+          #   f = this.cache_loader.load_cache(load_layer_cache, i, j + 1, 0, this.cpu_del[j + 1])
+          #   layers_cache_sync[j + 1] = f
 
-        compute_layer(i, j, layers_weights_sync[j], layers_cache_sync[j])
-        if i==0:
-          this.sync()
+          # print("compute layer",j)
+          compute_layer(i, j, layers_weights_sync[j], layers_cache_sync[j])
+          if i==0:
+            this.sync()
+          if j == this.num_layers - 1:
+            layers_weights_sync = [None for _ in range(this.num_layers)]
+            layers_cache_sync = [None for _ in range(this.num_layers)]
 
       timers("generate").stop()
 
