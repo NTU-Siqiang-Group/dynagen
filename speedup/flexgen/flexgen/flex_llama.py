@@ -45,7 +45,7 @@ from flexgen.utils import (
 fix_recursive_import()
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
-auto_pop = False
+auto_pop = True
 
 
 class LlamaInputEmbed(InputEmbed):
