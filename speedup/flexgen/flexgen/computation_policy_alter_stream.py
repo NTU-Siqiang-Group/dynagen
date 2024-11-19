@@ -6,46 +6,42 @@ import torch
 from concurrent.futures import ThreadPoolExecutor
 import time
 
-def wait_stream_finish(f, need_sync=False):
-  f.result()
-
-class CacheLoaderManager:
+class MultiStreamBase:
   def __init__(self, size):
     self.size = size
     self.streams = [torch.cuda.Stream() for _ in range(size)]
     self.executors = ThreadPoolExecutor(max_workers=size)
     self.execute_idx = 0
-    
-  
-  def load_cache(self, func, *args):
+
+  def run(self, need_sync, func, *args):
     use_stream = self.streams[self.execute_idx]
     self.execute_idx = (self.execute_idx + 1) % self.size
     def _run_func():
       with torch.cuda.stream(use_stream):
         func(*args)
       
-      use_stream.synchronize()
+      if need_sync:
+        use_stream.synchronize()
   
     return self.executors.submit(_run_func)
 
-class ComputationStreamAlterManager:
+def wait_stream_finish(f):
+  f.result()
+
+class CacheLoaderManager(MultiStreamBase):
   def __init__(self, size):
-    self.size = size
-    self.streams = [torch.cuda.Stream() for _ in range(size)]
-    self.executors = ThreadPoolExecutor(max_workers=size)
+    super().__init__(size)
     
-    def set_stream(use_stream):
-      torch.cuda.set_stream(use_stream)
-    
-    for i in range(size):
-      self.executors.submit(set_stream, self.streams[i])
   
-  def compute(self, func, *args):
-    def _run_func():
-      func(*args)
-      return torch.cuda.current_stream()
+  def load_cache(self, need_sync, func, *args):
+    return self.run(need_sync, func, *args)
 
-    return self.executors.submit(_run_func)
+class ComputationStreamAlterManager(MultiStreamBase):
+  def __init__(self, size):
+    super().__init__(size)
+  
+  def compute(self, need_sync, func, *args):
+    return self.run(need_sync, func, *args)
 
 class ComputationPolicyAlterStream(ComputationPolicyInterface):
   def generation_loop_normal(self, this, evaluate):
@@ -61,7 +57,7 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
     def compute_layer(i, j, weight_handle, cache_handle):
       wait_stream_finish(weight_handle)
       if this.layers[j].need_cache:
-        wait_stream_finish(cache_handle, True)
+        wait_stream_finish(cache_handle)
         
       cpu_del = this.cpu_del[j]
       this.load_hidden(i, j, 0)
@@ -75,46 +71,18 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
       this.update_attention_mask(i, 0)
       layers_weights_sync = [None for _ in range(this.num_layers)]
       layers_cache_sync = [None for _ in range(this.num_layers)]
-      f = this.cache_loader.load_cache(load_layer_weight, i, 0, this.cpu_del[0])
+      f = this.cache_loader.load_cache(True, load_layer_weight, i, 0, this.cpu_del[0])
       layers_weights_sync[0] = f
       for j in range(this.num_layers):
-          # print(j,"="*20)
-        # layers_weights_sync[j].result()
-        # if j < this.num_layers-1 and not(this.cpu_del[j+1]==0 and this.layers[j+1].need_cache):
-        #   # attention layer and CPU delegation
-        #   # find the next cpu delegation layer
-        #   next_gpu_del = None
-        #   for k in range(j + 1, this.num_layers):
-        #     if not this.cpu_del[k] and this.layers[k].need_cache:
-        #       next_gpu_del = k
-        #       break
-        #   end = next_gpu_del if not next_gpu_del is None else this.num_layers
           # load weight and cache
-          for k in range(j + 1, min(j + 3, this.num_layers)):
+          for k in range(j + 1, this.num_layers):
             if layers_weights_sync[k] is None:
-              # print("load weight",k)
-              f = this.cache_loader.load_cache(load_layer_weight, i, k, this.cpu_del[k])
+              f = this.cache_loader.load_cache(True, load_layer_weight, i, k, this.cpu_del[k])
               layers_weights_sync[k] = f
-              # if this.layers[k].need_cache:
-              #   print("load cache",k)
-              f = this.cache_loader.load_cache(load_layer_cache, i, k, 0, this.cpu_del[k])
+              f = this.cache_loader.load_cache(True, load_layer_cache, i, k, 0, this.cpu_del[k])
               layers_cache_sync[k] = f
-        # else:
-          # GPU attention, MLP, input, or output layer
-          # computation in the current thread
-          # next layer's weight & cache
-          # if j + 1 < this.num_layers and layers_weights_sync[j + 1] is None:
-          #   print("load weight",j+1)
-          #   f = this.cache_loader.load_cache(load_layer_weight, i, j + 1, this.cpu_del[j + 1])
-          #   layers_weights_sync[j + 1] = f
-            
-          #   f = this.cache_loader.load_cache(load_layer_cache, i, j + 1, 0, this.cpu_del[j + 1])
-          #   layers_cache_sync[j + 1] = f
-
-          # print("compute layer",j)
           compute_layer(i, j, layers_weights_sync[j], layers_cache_sync[j])
-          if i==0:
-            this.sync()
+          torch.cuda.current_stream().synchronize()
           if j == this.num_layers - 1:
             layers_weights_sync = [None for _ in range(this.num_layers)]
             layers_cache_sync = [None for _ in range(this.num_layers)]
