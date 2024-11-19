@@ -55,7 +55,8 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
       this.load_cache_dyn(i, j, k, load_to_cpu=load_to_cpu)
       
     def compute_layer(i, j, weight_handle, cache_handle):
-      wait_stream_finish(weight_handle)
+      if this.weight_read_buf[j].val is None:
+        wait_stream_finish(weight_handle)
       if this.layers[j].need_cache:
         wait_stream_finish(cache_handle)
         
@@ -64,31 +65,32 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
       this.compute_layer(i, j, 0, cpu_delegation=cpu_del)
       this.store_cache(i, j - 1, 0)
       this.store_hidden(i, j, 0)
-      this.pop_weight(i, j, 0)
+      # this.pop_weight(i, j, 0)
     
+    layers_weights_sync = [None for _ in range(this.num_layers * 2)]
+    layers_cache_sync = [None for _ in range(this.num_layers)]
     for i in tqdm(range(this.execute_gen_len)):
       timers("generate").start()                    
       this.update_attention_mask(i, 0)
-      layers_weights_sync = [None for _ in range(this.num_layers)]
-      layers_cache_sync = [None for _ in range(this.num_layers)]
+
       f = this.cache_loader.load_cache(True, load_layer_weight, i, 0, this.cpu_del[0])
       layers_weights_sync[0] = f
       for j in range(this.num_layers):
           # load weight and cache
-          for k in range(j + 1, min(j+6,this.num_layers)):
+          for k in range(j + 1, j + 6):
             if layers_weights_sync[k] is None:
-              f = this.cache_loader.load_cache(True, load_layer_weight, i, k, this.cpu_del[k])
+              f = this.cache_loader.load_cache(True, load_layer_weight, i, k, this.cpu_del[k % this.num_layers])
               layers_weights_sync[k] = f
-              f = this.cache_loader.load_cache(True, load_layer_cache, i, k, 0, this.cpu_del[k])
+          for k in range(j + 1, min(j + 6, this.num_layers)):
+            if layers_cache_sync[k] is None:
+              f = this.cache_loader.load_cache(True, load_layer_cache, i, k, 0, this.cpu_del[k % this.num_layers])
               layers_cache_sync[k] = f
           compute_layer(i, j, layers_weights_sync[j], layers_cache_sync[j])
           if i==0:
             this.sync()
-          # torch.cuda.current_stream().synchronize()
-          # this.pop_weight(i, j, 0)
-          # if j == this.num_layers - 1:
-          #   layers_weights_sync = [None for _ in range(this.num_layers)]
-          #   layers_cache_sync = [None for _ in range(this.num_layers)]
+          if j == this.num_layers - 1:
+            layers_weights_sync = layers_weights_sync[this.num_layers:] + [None for _ in range(this.num_layers)]
+            layers_cache_sync = [None for _ in range(this.num_layers)]
 
       timers("generate").stop()
 

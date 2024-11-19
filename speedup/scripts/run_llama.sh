@@ -1,5 +1,5 @@
 FLEXGEN_PATH=$PWD/../flexgen
-# for MODEL in "meta-llama/Llama-3.2-1B"
+# MODEL="meta-llama/Llama-3.2-1B"
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
 # for MODEL in "meta-llama/Llama-3.1-70B-Instruct" 
 # for MODEL in "facebook/opt-6.7B"

@@ -858,8 +858,8 @@ class OptLM:
 
     def load_weight(self, i, j, k, overlap=True):
         # Handle corner cases
-        if j == self.num_layers:
-            j = 0
+        if j >= self.num_layers:
+            j = j % self.num_layers
             i += 1
             if i == self.execute_gen_len:
                 return
@@ -897,8 +897,8 @@ class OptLM:
         if k == self.num_gpu_batches:
             k = 0
             j += 1
-        if j == self.num_layers:
-            j = 0
+        if j >= self.num_layers:
+            j = j % self.num_layers
             i += 1
             if i == self.execute_gen_len:
                 return
