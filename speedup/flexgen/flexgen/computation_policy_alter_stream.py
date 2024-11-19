@@ -83,6 +83,7 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
               layers_cache_sync[k] = f
           compute_layer(i, j, layers_weights_sync[j], layers_cache_sync[j])
           torch.cuda.current_stream().synchronize()
+          this.pop_weight(i, j, 0)
           if j == this.num_layers - 1:
             layers_weights_sync = [None for _ in range(this.num_layers)]
             layers_cache_sync = [None for _ in range(this.num_layers)]
