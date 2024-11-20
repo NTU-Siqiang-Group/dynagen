@@ -68,20 +68,19 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
       # this.pop_weight(i, j, 0)
     
     layers_weights_sync = [None for _ in range(this.num_layers * 2)]
-    layers_cache_sync = [None for _ in range(this.num_layers)]
+    layers_cache_sync = [None for _ in range(this.num_layers * 2)]
+    f = this.cache_loader.load_cache(True, load_layer_weight, 0, 0, this.cpu_del[0])
+    layers_weights_sync[0] = f
     for i in tqdm(range(this.execute_gen_len)):
       timers("generate").start()                    
       this.update_attention_mask(i, 0)
-
-      f = this.cache_loader.load_cache(True, load_layer_weight, i, 0, this.cpu_del[0])
-      layers_weights_sync[0] = f
       for j in range(this.num_layers):
           # load weight and cache
           for k in range(j + 1, j + 6):
             if layers_weights_sync[k] is None:
               f = this.cache_loader.load_cache(True, load_layer_weight, i, k, this.cpu_del[k % this.num_layers])
               layers_weights_sync[k] = f
-          for k in range(j + 1, min(j + 6, this.num_layers)):
+          for k in range(j + 1, min(j + 6, this.num_layers + 5)):
             if layers_cache_sync[k] is None:
               f = this.cache_loader.load_cache(True, load_layer_cache, i, k, 0, this.cpu_del[k % this.num_layers])
               layers_cache_sync[k] = f
@@ -90,7 +89,7 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
             this.sync()
           if j == this.num_layers - 1:
             layers_weights_sync = layers_weights_sync[this.num_layers:] + [None for _ in range(this.num_layers)]
-            layers_cache_sync = [None for _ in range(this.num_layers)]
+            layers_cache_sync = layers_cache_sync[this.num_layers:] + [None for _ in range(this.num_layers)]
 
       timers("generate").stop()
 

@@ -911,18 +911,18 @@ class OptLM:
             self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
     
     def load_cache_dyn(self, i, j, k, load_to_cpu=False):
-        if not self.layers[j].need_cache:
-            return
-        if i == 0:  # prefill, no cache
+        if not self.layers[j % self.num_layers].need_cache:
             return
         if k == self.num_gpu_batches:
             k = 0
             j += 1
-        if j == self.num_layers:
-            j = 0
+        if j >= self.num_layers:
+            j = j % self.num_layers
             i += 1
             if i == self.execute_gen_len:
                 return
+        if i == 0:  # prefill, no cache
+            return
         self.layers[j].load_cache_dyn(self.cache_home[j][k], self.cache_read_buf[j][k], i, load_to_cpu)
 
 
