@@ -45,7 +45,7 @@ from flexgen.utils import (
 fix_recursive_import()
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
-auto_pop = True
+auto_pop = False
 
 
 class LlamaInputEmbed(InputEmbed):
@@ -356,11 +356,11 @@ class LlamaLM(OptLM):
         # comment: the best setting is computing all the layers on GPU on Triangle001
         idx = 0
         self.cpu_del = torch.zeros(self.num_layers)
-        for i in range(self.num_layers):
-            if isinstance(self.layers[i], LlamaSelfAttention):
-                if idx % 2 == 0:
-                    self.cpu_del[i] = 1
-                idx += 1
+        # for i in range(self.num_layers):
+        #     if isinstance(self.layers[i], LlamaSelfAttention):
+        #         if idx % 2 == 0:
+        #             self.cpu_del[i] = 1
+        #         idx += 1
 
         if self.policy.act_gpu_percent == 100:
             self.act_home = self.env.gpu
@@ -596,7 +596,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     add_parser_arguments(parser)
     args = parser.parse_args()
-    auto_pop = args.computation_policy == "default"
+    auto_pop = args.computation_policy == "default" or (args.computation_policy == "alter_stream" and args.num_gpu_batches == 1)
 
     assert len(args.percent) == 6
 

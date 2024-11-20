@@ -100,19 +100,16 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
       
     def load_layer_cache(i, j, k, load_to_cpu=False):
       this.load_cache_dyn(i, j, k, load_to_cpu=load_to_cpu)
-    
-    def load_hidden(i, j, k):
-      this.load_hidden(i, j, k)
       
-    def compute_layer(i, j, k, weight_handle, cache_handle, hidden_handle):
+    def compute_layer(i, j, k, weight_handle, cache_handle):
       wait_stream_finish(weight_handle)
-      wait_stream_finish(hidden_handle)
       if this.layers[j].need_cache:
         wait_stream_finish(cache_handle)
         
       cpu_del = this.cpu_del[j]
+      this.load_hidden(i, j, k)
       this.compute_layer(i, j, k, cpu_delegation=cpu_del)
-      this.store_cache(i, j, k, overlap=False)
+      this.store_cache(i, j - 1, k, overlap=False)
       this.store_hidden(i, j, k)
 
     for i in tqdm(range(this.execute_gen_len)):
@@ -123,43 +120,36 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
       
       layers_weights_sync = [None for _ in range(this.num_layers)]
       layer_cache_sync = [[None for _ in range(this.num_gpu_batches)] for _ in range(this.num_layers)]
-      layer_hidden_sync = [[None for _ in range(this.num_gpu_batches)] for _ in range(this.num_layers)]
       # load the first weight
-      w = this.cache_loader.load_cache(load_layer_weight, i, 0)
+      w = this.cache_loader.load_cache(True, load_layer_weight, i, 0)
       layers_weights_sync[0] = w
-      h = this.cache_loader.load_cache(load_hidden, i, 0, 0)
-      layer_hidden_sync[0][0] = h
       for j in range(this.num_layers):
         futures = []
         for k in range(this.num_gpu_batches):
-          if k != this.num_gpu_batches - 1:
-            f = this.stream_manager.compute(compute_layer, i, j, k, layers_weights_sync[j], layer_cache_sync[j][k], layer_hidden_sync[j][k])
-            futures.append(f)
-          else:
-            compute_layer(i, j, k, layers_weights_sync[j], layer_cache_sync[j][k], layer_hidden_sync[j][k])
-          
-          target_layer = j
-          target_batch = k + 1
+          preload_layer = j
+          preload_batch = k + 1
           if k == this.num_gpu_batches - 1:
-            target_layer = j + 1
-            target_batch = 0
+            preload_layer = j + 1
+            preload_batch = 0
           
-          h = this.cache_loader.load_cache(load_hidden, i, target_layer, target_batch)
-          layer_hidden_sync[target_layer][target_batch] = h
-        
-          if this.layers[target_layer].need_cache:
+          if preload_layer < this.num_layers and this.layers[preload_layer].need_cache:
             # load next batch's cache
-            c = this.cache_loader.load_cache(load_layer_cache, i, target_layer, target_batch)
-            layer_cache_sync[target_layer][target_batch] = c
+            c = this.cache_loader.load_cache(True, load_layer_cache, i, preload_layer, preload_batch)
+            layer_cache_sync[preload_layer][preload_batch] = c
           
-          if k == 0 and j + 1 < this.num_layers:
-            # load next layer's weight
-            w = this.cache_loader.load_cache(load_layer_weight, i, j + 1)
-            layers_weights_sync[j + 1] = w
-        
+          if k == 0 and preload_layer + 1 < this.num_layers:
+            # The first batch: load next layer's weight
+            w = this.cache_loader.load_cache(True, load_layer_weight, i, preload_layer + 1)
+            layers_weights_sync[preload_layer + 1] = w
+          
+          f = this.stream_manager.compute(True, compute_layer, i, j, k, layers_weights_sync[j], layer_cache_sync[j][k])
+          futures.append(f)
+
         # sync
         for f in futures:
           f.result()
+        if i==0:
+          this.sync()
         
         this.pop_weight(i, j, 0)
       
