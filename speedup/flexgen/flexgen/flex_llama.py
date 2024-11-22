@@ -356,11 +356,11 @@ class LlamaLM(OptLM):
         # comment: the best setting is computing all the layers on GPU on Triangle001
         idx = 0
         self.cpu_del = torch.zeros(self.num_layers)
-        # for i in range(self.num_layers):
-        #     if isinstance(self.layers[i], LlamaSelfAttention):
-        #         if idx % 2 == 0:
-        #             self.cpu_del[i] = 1
-        #         idx += 1
+        for i in range(self.num_layers):
+            if isinstance(self.layers[i], LlamaSelfAttention):
+                if idx % 2 == 0:
+                    self.cpu_del[i] = 1
+                idx += 1
 
         if self.policy.act_gpu_percent == 100:
             self.act_home = self.env.gpu
@@ -413,11 +413,14 @@ class LlamaLM(OptLM):
         self.layers[j].init_weight(self.weight_home[j], expanded_path)
 
 
-def get_inputs(prompt_len, num_prompts, tokenizer, path):
+def get_inputs(prompt_len, num_prompts, tokenizer, model, path):
     prompts = []
     with open(path, "r") as file:
         prompts.append(file.read())
-    prompts = [prompts[0][: int(prompt_len * 4)]]
+    if "Llama-2" in model:
+        prompts = [prompts[0][: int(prompt_len * 2.5)]]
+    else:
+        prompts = [prompts[0][: int(prompt_len * 4)]]
     input_ids = tokenizer(prompts, padding="max_length", max_length=prompt_len).input_ids
     input_ids[0] = input_ids[0][:prompt_len]
     return (input_ids[0],) * num_prompts
@@ -431,8 +434,8 @@ def run_flexgen(args):
     prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
 
     # Task and policy
-    warmup_inputs = get_inputs(32, num_prompts, tokenizer, args.warmup_input_path)
-    inputs = get_inputs(prompt_len, num_prompts, tokenizer, args.test_input_path)
+    warmup_inputs = get_inputs(32, num_prompts, tokenizer, args.model, args.warmup_input_path)
+    inputs = get_inputs(prompt_len, num_prompts, tokenizer, args.model, args.test_input_path)
 
     gpu = LlamaTorchDevice("cuda:0")
     cpu = LlamaTorchDevice("cpu")
@@ -596,7 +599,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     add_parser_arguments(parser)
     args = parser.parse_args()
-    auto_pop = args.computation_policy == "default" or (args.computation_policy == "alter_stream" and args.num_gpu_batches == 1)
+    auto_pop = args.computation_policy == "default" or (
+        args.computation_policy == "alter_stream" and args.num_gpu_batches == 1
+    )
 
     assert len(args.percent) == 6
 

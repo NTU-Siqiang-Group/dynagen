@@ -49,14 +49,15 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
   
   def generation_loop_overlap_single_batch(self, this, evaluate, profile_dir):
     def load_layer_weight(i, j, load_to_cpu=False):
-      this.load_weight(i, j, 0)
+      this.load_weight(i, j, 0, overlap=False)
     
     def load_layer_cache(i, j, k, load_to_cpu=False):
       this.load_cache_dyn(i, j, k, load_to_cpu=load_to_cpu)
       
     def compute_layer(i, j, weight_handle, cache_handle):
-      if this.weight_read_buf[j].val is None:
-        wait_stream_finish(weight_handle)
+      # if this.weight_read_buf[j].val is None:
+      wait_stream_finish(weight_handle)
+      # this.load_weight_stream.synchronize()
       if this.layers[j].need_cache:
         wait_stream_finish(cache_handle)
         
@@ -80,7 +81,7 @@ class ComputationPolicyAlterStream(ComputationPolicyInterface):
             if layers_weights_sync[k] is None:
               f = this.cache_loader.load_cache(True, load_layer_weight, i, k, this.cpu_del[k % this.num_layers])
               layers_weights_sync[k] = f
-          for k in range(j + 1, min(j + 6, this.num_layers + 5)):
+          for k in range(j + 1, min(j + 4, this.num_layers + 5)):
             if layers_cache_sync[k] is None:
               f = this.cache_loader.load_cache(True, load_layer_cache, i, k, 0, this.cpu_del[k % this.num_layers])
               layers_cache_sync[k] = f
