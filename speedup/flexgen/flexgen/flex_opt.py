@@ -127,7 +127,7 @@ def init_weight_list(weight_specs, policy, env):
         mid_percent = (sizes_cumsum[i] - sizes[i] / 2) / sizes_cumsum[-1]
         home = get_choice(mid_percent * 100, dev_percents, dev_choices)
         for j in range(len(dev_choices)):
-            if(home == dev_choices[j]):
+            if home == dev_choices[j]:
                 actual_distribution[j] += sizes[i]
         shape, dtype, filename = weight_specs[i]
 
