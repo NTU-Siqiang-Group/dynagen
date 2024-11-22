@@ -87,6 +87,7 @@ class Policy:
     compress_cache: bool
     comp_cache_config: CompressionConfig
 
+
     @property
     def w_disk_percent(self):
         return 100 - self.w_gpu_percent - self.w_cpu_percent
@@ -99,6 +100,7 @@ class Policy:
     def act_disk_percent(self):
         return 100 - self.act_gpu_percent - self.act_cpu_percent
 
+cpu_deviate = 0
 
 def get_choice(cur_percent, percents, choices):
     percents = np.cumsum(percents)
@@ -113,13 +115,20 @@ def get_choice(cur_percent, percents, choices):
 def init_weight_list(weight_specs, policy, env):
     dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
     dev_choices = [env.disk, env.cpu, env.gpu]
-
+    global cpu_deviate
     sizes = [np.prod(spec[0]) for spec in weight_specs]
     sizes_cumsum = np.cumsum(sizes)
     ret = []
+    target_distribution = np.array(dev_percents) / 100.0 * sizes_cumsum[-1]
+    actual_distribution = np.array([0, 0, 0])
+    dev_percents[1] += cpu_deviate / sizes_cumsum[-1]  * 100
+    dev_percents[2] -= cpu_deviate / sizes_cumsum[-1]  * 100
     for i in range(len(weight_specs)):
         mid_percent = (sizes_cumsum[i] - sizes[i] / 2) / sizes_cumsum[-1]
         home = get_choice(mid_percent * 100, dev_percents, dev_choices)
+        for j in range(len(dev_choices)):
+            if home == dev_choices[j]:
+                actual_distribution[j] += sizes[i]
         shape, dtype, filename = weight_specs[i]
 
         if len(shape) < 2:
@@ -148,6 +157,7 @@ def init_weight_list(weight_specs, policy, env):
                     x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
 
         ret.append(weight)
+    cpu_deviate += target_distribution[1] - actual_distribution[1]
     return ret
 
 
@@ -1051,6 +1061,7 @@ class OptLM:
     def init_all_weights(self):
         self.weight_home = array_1d(self.num_layers, ValueHolder)
         for j in range(self.num_layers):
+            #print("j = "+str(j))
             self.init_weight(j)
 
     def delete_all_weights(self):
