@@ -1296,12 +1296,12 @@ class LlamaTorchDevice(TorchDevice):
                 v = v.permute(1, 0, 2).reshape(b * n_head, src_s, head_dim)
 
                 if k.is_cuda:
-                    value = self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
+                    value = self._attention_value(q, k, v, attention_mask_gpu.data, b, src_s, tgt_s, n_head, head_dim)
                 else:
                     q = q.float().cpu()
                     k, v = k.float(), v.float()
                     value = (
-                        self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
+                        self._attention_value(q, k, v, attention_mask_cpu.data, b, src_s, tgt_s, n_head, head_dim)
                         .cuda()
                         .half()
                     )
