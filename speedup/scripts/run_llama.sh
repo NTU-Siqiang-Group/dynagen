@@ -3,13 +3,14 @@ FLEXGEN_PATH=$PWD/../flexgen
 for SCHEME in "original"
 do
   # for MODEL in "meta-llama/Llama-3.2-1B"
-  for MODEL in "meta-llama/Llama-3.1-8B-Instruct"
+  # for MODEL in "meta-llama/Llama-3.1-8B-Instruct"
   # for MODEL in "meta-llama/Llama-3.1-70B-Instruct" 
+  for MODEL in "meta-llama/Llama-2-13b-hf"
   # for MODEL in "facebook/opt-6.7B"
   do
     CMD="--model $MODEL"
-    CMD=$CMD" --percent 100 0 0 100 100 0"
-    CMD=$CMD" --gpu-batch-size 8 --num-gpu-batches 1 --prompt-len 2048 --gen-len 32 --cpu-cache-compute" # --profile-dir /fs/resource/ywp/llama_logs/"
+    CMD=$CMD" --percent 50 50 0 100 100 0"
+    CMD=$CMD" --gpu-batch-size 4 --num-gpu-batches 1 --prompt-len 1024 --gen-len 32 --cpu-cache-compute" # --profile-dir /fs/resource/ywp/llama_logs/"
     #--cpu-cache-compute
     if [ "$SCHEME" = "int4" ]
     then
