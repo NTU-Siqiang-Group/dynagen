@@ -217,7 +217,7 @@ class TorchDevice:
 
             # We currently separate SelfAttention and MLP as two layers,
             # so we only need one workspace instead of two.
-            for i in range(1 if policy.sep_layer else 2):
+            for i in range(8 if policy.sep_layer else 2):
                 shape = (max_seq_len, b * n_head, head_dim)
                 k_cache = self.allocate(shape, np.float32, pin_memory=False)
                 v_cache = self.allocate(shape, np.float32, pin_memory=False)
@@ -1247,6 +1247,7 @@ class LlamaTorchDevice(TorchDevice):
             attention_mask_cpu, attention_mask_gpu = attention_mask
             src_s = attention_mask_cpu.shape[1]
         else:
+            attention_mask_cpu = attention_mask_gpu = attention_mask
             src_s = attention_mask.shape[1]
         # src_s = attention_mask.shape[1]
         head_dim = h // n_head
@@ -1296,12 +1297,12 @@ class LlamaTorchDevice(TorchDevice):
                 v = v.permute(1, 0, 2).reshape(b * n_head, src_s, head_dim)
 
                 if k.is_cuda:
-                    value = self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
+                    value = self._attention_value(q, k, v, attention_mask_gpu.data, b, src_s, tgt_s, n_head, head_dim)
                 else:
                     q = q.float().cpu()
                     k, v = k.float(), v.float()
                     value = (
-                        self._attention_value(q, k, v, attention_mask.data, b, src_s, tgt_s, n_head, head_dim)
+                        self._attention_value(q, k, v, attention_mask_cpu.data, b, src_s, tgt_s, n_head, head_dim)
                         .cuda()
                         .half()
                     )

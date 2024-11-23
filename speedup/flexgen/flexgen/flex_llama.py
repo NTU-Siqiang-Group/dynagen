@@ -11,6 +11,8 @@ from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
 from flexgen.computation_policy import get_computation_policy
+from flexgen.computation_policy_streams import ComputationStreams
+from flexgen.computation_policy_alter_stream import ComputationStreamAlterManager, CacheLoaderManager
 from flexgen.pytorch_backend import (
     LlamaTorchDevice,
     TorchDisk,
@@ -43,6 +45,7 @@ from flexgen.utils import (
 fix_recursive_import()
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
+auto_pop = False
 
 
 class LlamaInputEmbed(InputEmbed):
@@ -66,6 +69,9 @@ class LlamaInputEmbed(InputEmbed):
             dst = self.weight_load_dst
             weight_read_buf.store((w_token.smart_copy(dst),))
 
+    def pop_weight(self, weight_read_buf):
+        weight_read_buf.pop()
+
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         # Compute input embedding
         donate = [False] * 3
@@ -76,7 +82,7 @@ class LlamaInputEmbed(InputEmbed):
             donate[1] = False
         else:
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             ((w_token, donate[2]),) = weight_read_buf.pop()
         else:
@@ -110,11 +116,14 @@ class LlamaOutputEmbed(OutputEmbed):
             dst2 = self.compute
             weight_read_buf.store((w_ln.smart_copy(dst2), w_token.smart_copy(dst1)))
 
+    def pop_weight(self, weight_read_buf):
+        weight_read_buf.pop()
+
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 3
         h, donate[0] = hidden.val, True
 
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (w_ln, donate[1]), (w_token, donate[2]) = weight_read_buf.pop()
         else:
@@ -179,10 +188,19 @@ class LlamaSelfAttention(SelfAttention):
                 )
             )
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
+    def pop_weight(self, weight_read_buf):
+        weight_read_buf.pop()
+
+    def forward(
+        self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, cpu_delegation=None
+    ):
         n_head = self.config.n_head
         n_kv_head = self.config.num_key_value_heads
-
+        compute = self.compute
+        if not cpu_delegation is None:
+            attention_compute = self.env.cpu if cpu_delegation else self.env.gpu
+        else:
+            attention_compute = self.attention_compute
         donate = [False] * 10
         h, donate[0] = hidden.val, True
         if isinstance(attention_mask, tuple):
@@ -191,10 +209,10 @@ class LlamaSelfAttention(SelfAttention):
             donate[1] = False
         else:
             if i == 0:
-                mask_gpu, donate[1] = attention_mask.val.smart_copy(self.compute)
+                mask_gpu, donate[1] = attention_mask.val.smart_copy(compute)
             else:
-                mask_gpu, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
-        if k == self.policy.num_gpu_batches - 1:
+                mask_gpu, donate[1] = attention_mask.val.smart_copy(attention_compute)
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (
                 (w_ln, donate[2]),
@@ -210,7 +228,7 @@ class LlamaSelfAttention(SelfAttention):
         if i == 0:  # prefill
             # mask, donate[1] = attention_mask.val.smart_copy(self.compute)
             position_ids = torch.cumsum(mask_gpu.data, dim=1).int() * mask_gpu.data + 1
-            h, new_k_cache, new_v_cache = self.compute.llama_mha(
+            h, new_k_cache, new_v_cache = compute.llama_mha(
                 h,
                 position_ids,
                 mask_gpu,
@@ -233,7 +251,7 @@ class LlamaSelfAttention(SelfAttention):
             (k_cache, donate[8]), (v_cache, donate[9]) = cache_read_buf.pop()
             position_ids = torch.cumsum(mask_gpu.data, dim=1).long() * mask_gpu.data + 1
             position_ids = position_ids[:, -h.shape[1]].unsqueeze(1)
-            h, new_k_cache, new_v_cache = self.compute.llama_mha_gen(
+            h, new_k_cache, new_v_cache = compute.llama_mha_gen(
                 h,
                 position_ids,
                 (mask_cpu, mask_gpu) if isinstance(attention_mask, tuple) else mask_gpu,
@@ -287,11 +305,13 @@ class LlamaMLP(MLP):
                 (w_ln.smart_copy(dst2), w_g.smart_copy(dst1), w_u.smart_copy(dst1), w_d.smart_copy(dst1))
             )
 
+    def pop_weight(self, weight_read_buf):
+        weight_read_buf.pop()
+
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 5
         h, donate[0] = hidden.val, True
-
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             ((w_ln, donate[1]), (w_g, donate[2]), (w_u, donate[3]), (w_d, donate[4])) = weight_read_buf.pop()
         else:
@@ -318,7 +338,7 @@ class LlamaLM(OptLM):
         self.path = path
         self.policy = policy
         self.num_gpu_batches = policy.num_gpu_batches
-        self.computation_policy = get_computation_policy()
+        self.computation_policy = get_computation_policy(parser.parse_args().computation_policy)
 
         layers = []
         layers.append(LlamaInputEmbed(self.config, self.env, self.policy))
@@ -331,6 +351,16 @@ class LlamaLM(OptLM):
         layers.append(LlamaOutputEmbed(self.config, self.env, self.policy))
         self.layers = layers
         self.num_layers = len(layers)
+        # 0: no delegation
+        # 1: CPU delegation
+        # comment: the best setting is computing all the layers on GPU on Triangle001
+        idx = 0
+        self.cpu_del = torch.zeros(self.num_layers)
+        for i in range(self.num_layers):
+            if isinstance(self.layers[i], LlamaSelfAttention):
+                if idx % 2 == 0:
+                    self.cpu_del[i] = 1
+                idx += 1
 
         if self.policy.act_gpu_percent == 100:
             self.act_home = self.env.gpu
@@ -345,6 +375,11 @@ class LlamaLM(OptLM):
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
+        if parser.parse_args().computation_policy == "stream":
+            self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
+        elif parser.parse_args().computation_policy == "alter_stream":
+            self.stream_manager = ComputationStreamAlterManager(32)
+            self.cache_loader = CacheLoaderManager(32)
 
         # Intermediate tensors
         # The following buffers store values used
@@ -360,12 +395,9 @@ class LlamaLM(OptLM):
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
         self.attention_mask_gpu = None
-        if (
-            self.policy.cpu_cache_compute
-            and self.policy.cache_cpu_percent < 100
-            and self.policy.cache_gpu_percent < 100
-        ):
+        if self.policy.cpu_cache_compute:
             self.attention_mask_gpu = array_1d(num_gpu_batches, ValueHolder)
+
         self.task = None
         self.init_all_weights()
 
@@ -556,6 +588,7 @@ def add_parser_arguments(parser):
 
     parser.add_argument("--warmup-input-path", type=str, default="./pg19_firstbook.txt")
     parser.add_argument("--test-input-path", type=str, default="./pg19_firstbook.txt")
+    parser.add_argument("--computation-policy", type=str, default="default")
 
 
 if __name__ == "__main__":
@@ -563,6 +596,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     add_parser_arguments(parser)
     args = parser.parse_args()
+    auto_pop = args.computation_policy == "default" or (
+        args.computation_policy == "alter_stream" and args.num_gpu_batches == 1
+    )
 
     assert len(args.percent) == 6
 
