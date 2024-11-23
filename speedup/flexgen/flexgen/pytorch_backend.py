@@ -1247,6 +1247,7 @@ class LlamaTorchDevice(TorchDevice):
             attention_mask_cpu, attention_mask_gpu = attention_mask
             src_s = attention_mask_cpu.shape[1]
         else:
+            attention_mask_cpu = attention_mask_gpu = attention_mask
             src_s = attention_mask.shape[1]
         # src_s = attention_mask.shape[1]
         head_dim = h // n_head

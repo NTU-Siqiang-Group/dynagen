@@ -395,12 +395,9 @@ class LlamaLM(OptLM):
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
         self.attention_mask_gpu = None
-        if (
-            self.policy.cpu_cache_compute
-            and self.policy.cache_cpu_percent < 100
-            and self.policy.cache_gpu_percent < 100
-        ):
+        if self.policy.cpu_cache_compute:
             self.attention_mask_gpu = array_1d(num_gpu_batches, ValueHolder)
+
         self.task = None
         self.init_all_weights()
 

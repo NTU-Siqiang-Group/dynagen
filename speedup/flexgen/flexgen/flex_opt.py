@@ -87,7 +87,6 @@ class Policy:
     compress_cache: bool
     comp_cache_config: CompressionConfig
 
-
     @property
     def w_disk_percent(self):
         return 100 - self.w_gpu_percent - self.w_cpu_percent
@@ -100,7 +99,9 @@ class Policy:
     def act_disk_percent(self):
         return 100 - self.act_gpu_percent - self.act_cpu_percent
 
+
 cpu_deviate = 0
+
 
 def get_choice(cur_percent, percents, choices):
     percents = np.cumsum(percents)
@@ -121,8 +122,8 @@ def init_weight_list(weight_specs, policy, env):
     ret = []
     target_distribution = np.array(dev_percents) / 100.0 * sizes_cumsum[-1]
     actual_distribution = np.array([0, 0, 0])
-    dev_percents[1] += cpu_deviate / sizes_cumsum[-1]  * 100
-    dev_percents[2] -= cpu_deviate / sizes_cumsum[-1]  * 100
+    dev_percents[1] += cpu_deviate / sizes_cumsum[-1] * 100
+    dev_percents[2] -= cpu_deviate / sizes_cumsum[-1] * 100
     for i in range(len(weight_specs)):
         mid_percent = (sizes_cumsum[i] - sizes[i] / 2) / sizes_cumsum[-1]
         home = get_choice(mid_percent * 100, dev_percents, dev_choices)
@@ -199,7 +200,7 @@ class InputEmbed:
 
     def load_cache(self, cache_home, cache_read_buf, i):
         pass  # do nothing
-    
+
     def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
         pass
 
@@ -273,7 +274,7 @@ class OutputEmbed:
 
     def store_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
-    
+
     def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
         pass
 
@@ -843,13 +844,8 @@ class OptLM:
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
         self.attention_mask_gpu = None
-        if (
-            self.policy.cpu_cache_compute
-            and self.policy.cache_cpu_percent < 100
-            and self.policy.cache_gpu_percent < 100
-        ):
+        if self.policy.cpu_cache_compute:
             self.attention_mask_gpu = array_1d(num_gpu_batches, ValueHolder)
-
         self.task = None
         self.init_all_weights()
 
@@ -880,6 +876,7 @@ class OptLM:
                 self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
         else:
             self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+
     def pop_weight(self, i, j, k):
       if j == self.num_layers:
             j = 0
@@ -934,7 +931,6 @@ class OptLM:
         if i == 0:  # prefill, no cache
             return
         self.layers[j].load_cache_dyn(self.cache_home[j][k], self.cache_read_buf[j][k], i, load_to_cpu)
-
 
     def store_cache(self, i, j, k, overlap=True):
         # Handle corner cases
@@ -1026,33 +1022,33 @@ class OptLM:
         # Run layer computation
         if self.layers[j].need_cache and cpu_delegation is not None:
             self.layers[j].forward(
-            self.hidden[i][j][k],
-            self.cache_read_buf[j][k],
-            self.weight_read_buf[j],
-            (
-                (self.attention_mask[k], self.attention_mask_gpu[k])
-                if self.attention_mask_gpu
-                else self.attention_mask[k]
-            ),
-            self.cache_write_buf[j][k],
-            i,
-            k,
-            cpu_delegation
-        )
+                self.hidden[i][j][k],
+                self.cache_read_buf[j][k],
+                self.weight_read_buf[j],
+                (
+                    (self.attention_mask[k], self.attention_mask_gpu[k])
+                    if self.attention_mask_gpu
+                    else self.attention_mask[k]
+                ),
+                self.cache_write_buf[j][k],
+                i,
+                k,
+                cpu_delegation,
+            )
         else:
-          self.layers[j].forward(
-              self.hidden[i][j][k],
-              self.cache_read_buf[j][k],
-              self.weight_read_buf[j],
-              (
-                  (self.attention_mask[k], self.attention_mask_gpu[k])
-                  if self.attention_mask_gpu
-                  else self.attention_mask[k]
-              ),
-              self.cache_write_buf[j][k],
-              i,
-              k,
-          )
+            self.layers[j].forward(
+                self.hidden[i][j][k],
+                self.cache_read_buf[j][k],
+                self.weight_read_buf[j],
+                (
+                    (self.attention_mask[k], self.attention_mask_gpu[k])
+                    if self.attention_mask_gpu
+                    else self.attention_mask[k]
+                ),
+                self.cache_write_buf[j][k],
+                i,
+                k,
+            )
 
     def sync(self):
         self.env.disk.synchronize()
@@ -1061,7 +1057,6 @@ class OptLM:
     def init_all_weights(self):
         self.weight_home = array_1d(self.num_layers, ValueHolder)
         for j in range(self.num_layers):
-            #print("j = "+str(j))
             self.init_weight(j)
 
     def delete_all_weights(self):
@@ -1254,6 +1249,7 @@ def get_inputs(prompt_len, num_prompts, tokenizer, path):
     input_ids[0] = input_ids[0][:prompt_len]
     return (input_ids[0],) * num_prompts
 
+
 def run_flexgen(args):
     if args.model == "facebook/galactica-30b":
         tokenizer = AutoTokenizer.from_pretrained("facebook/galactica-30b", padding_side="left")
@@ -1387,6 +1383,7 @@ def add_parser_arguments(parser):
 
     parser.add_argument("--warmup-input-path", type=str, default="./pg19_firstbook.txt")
     parser.add_argument("--test-input-path", type=str, default="./pg19_firstbook.txt")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
