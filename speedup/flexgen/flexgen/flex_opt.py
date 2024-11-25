@@ -377,7 +377,7 @@ class SelfAttention:
 
         cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
         cache_home.store(cache)
-    
+
     def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
         if i == 0:  # prefill, no cache
             return
@@ -565,12 +565,14 @@ class SelfAttention:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, cpu_delegation=None):
+    def forward(
+        self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, cpu_delegation=None
+    ):
         n_head = self.config.n_head
         if not cpu_delegation is None:
-          attention_compute = self.env.cpu if cpu_delegation else self.env.gpu
+            attention_compute = self.env.cpu if cpu_delegation else self.env.gpu
         else:
-          attention_compute = self.attention_compute
+            attention_compute = self.attention_compute
         donate = [False] * 14
         h, donate[0] = hidden.val, True
         if isinstance(attention_mask, tuple):
@@ -716,10 +718,10 @@ class MLP:
 
     def load_cache(self, cache_home, cache_read_buf, i):
         pass  # do nothing
-    
+
     def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
         pass
-    
+
     def store_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
 
@@ -800,7 +802,7 @@ class OptLM:
         self.path = path
         self.policy = policy
         self.num_gpu_batches = policy.num_gpu_batches
-        self.computation_policy = get_computation_policy('stream')
+        self.computation_policy = get_computation_policy("stream")
 
         layers = []
         layers.append(InputEmbed(self.config, self.env, self.policy))
@@ -827,7 +829,7 @@ class OptLM:
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
-        
+
         self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
 
         # Intermediate tensors
@@ -864,6 +866,9 @@ class OptLM:
 
     def load_weight(self, i, j, k, overlap=True):
         # Handle corner cases
+        if k >= self.num_gpu_batches:
+            k = k % self.num_gpu_batches
+            j += k // self.num_gpu_batches
         if j >= self.num_layers:
             j = j % self.num_layers
             i += 1
@@ -878,13 +883,13 @@ class OptLM:
             self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
 
     def pop_weight(self, i, j, k):
-      if j == self.num_layers:
+        if j == self.num_layers:
             j = 0
             i += 1
             if i == self.execute_gen_len:
                 return
-      self.layers[j].pop_weight(self.weight_read_buf[j])
-      
+        self.layers[j].pop_weight(self.weight_read_buf[j])
+
     def delete_weight(self, j, k):
         if k == 0:
             for x in self.weight_home[j].pop():
@@ -916,13 +921,14 @@ class OptLM:
                 self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
         else:
             self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
-    
+
     def load_cache_dyn(self, i, j, k, load_to_cpu=False):
-        if not self.layers[j % self.num_layers].need_cache:
-            return
-        if k == self.num_gpu_batches:
-            k = 0
-            j += 1
+        # if not self.layers[j % self.num_layers].need_cache:
+        #     return
+        # print("before", i, j, k)
+        if k >= self.num_gpu_batches:
+            j += k // self.num_gpu_batches
+            k = k % self.num_gpu_batches
         if j >= self.num_layers:
             j = j % self.num_layers
             i += 1
@@ -930,6 +936,7 @@ class OptLM:
                 return
         if i == 0:  # prefill, no cache
             return
+        # print("after", i, j, k)
         self.layers[j].load_cache_dyn(self.cache_home[j][k], self.cache_read_buf[j][k], i, load_to_cpu)
 
     def store_cache(self, i, j, k, overlap=True):
@@ -945,7 +952,8 @@ class OptLM:
         if i == self.task.gen_len - 1:  # last token, no need to store cache
             self.cache_write_buf[j][k].pop()
             return
-
+        # if self.cache_write_buf[j][k].val:
+        #     print(f"cache_write_buf[{j}][{k}]", self.cache_write_buf[j][k].val[0].data[0][0][-2:])
         # Store cache_write_buf to cache_home
         # Delete cache_write_buf
         if overlap:
@@ -998,7 +1006,7 @@ class OptLM:
             if i == -1:
                 return
 
-        # Store to hidden states buffers
+        # Store to hidden states buffers\
         if j == self.num_layers - 1:  # store to output
             gpu_batch_size = self.policy.gpu_batch_size
             left, right = k * gpu_batch_size, (k + 1) * gpu_batch_size

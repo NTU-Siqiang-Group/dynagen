@@ -12,7 +12,7 @@ from flexgen.compression import CompressionConfig
 from flexgen.llama_config import LlamaConfig, get_llama_config, download_llama_weights
 from flexgen.computation_policy import get_computation_policy
 from flexgen.computation_policy_streams import ComputationStreams
-from flexgen.computation_policy_alter_stream import ComputationStreamAlterManager, CacheLoaderManager
+from flexgen.computation_policy_alter_v2 import ComputationStreamAlterManager, CacheLoaderManager
 from flexgen.pytorch_backend import (
     LlamaTorchDevice,
     TorchDisk,
@@ -45,7 +45,7 @@ from flexgen.utils import (
 fix_recursive_import()
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
-auto_pop = False
+auto_pop = True
 
 
 class LlamaInputEmbed(InputEmbed):
@@ -212,7 +212,9 @@ class LlamaSelfAttention(SelfAttention):
                 mask_gpu, donate[1] = attention_mask.val.smart_copy(compute)
             else:
                 mask_gpu, donate[1] = attention_mask.val.smart_copy(attention_compute)
+        # print(k, "=" * 20)
         if auto_pop and k == self.policy.num_gpu_batches - 1:
+            # print("final")
             # Clear the weight_read_buf if it is the last gpu batch
             (
                 (w_ln, donate[2]),
@@ -223,6 +225,7 @@ class LlamaSelfAttention(SelfAttention):
                 (w_o, donate[7]),
             ) = weight_read_buf.pop()
         else:
+            # print("normal")
             ((w_ln, _), (w_q, _), (w_k, _), (w_v, _), (w_re, _), (w_o, _)) = weight_read_buf.val
 
         if i == 0:  # prefill
@@ -377,7 +380,7 @@ class LlamaLM(OptLM):
         self.store_cache_stream = torch.cuda.Stream()
         if parser.parse_args().computation_policy == "stream":
             self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
-        elif parser.parse_args().computation_policy == "alter_stream":
+        elif parser.parse_args().computation_policy == "alter_stream" or "alter_v2":
             self.stream_manager = ComputationStreamAlterManager(32)
             self.cache_loader = CacheLoaderManager(32)
 
@@ -596,9 +599,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     add_parser_arguments(parser)
     args = parser.parse_args()
-    auto_pop = args.computation_policy == "default" or (
-        args.computation_policy == "alter_stream" and args.num_gpu_batches == 1
-    )
+    # auto_pop = args.computation_policy == "default" or (
+    #     args.computation_policy == "alter_stream" and args.num_gpu_batches == 1
+    # )
 
     assert len(args.percent) == 6
 
