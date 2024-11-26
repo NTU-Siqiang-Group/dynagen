@@ -377,7 +377,7 @@ class LlamaLM(OptLM):
         self.store_cache_stream = torch.cuda.Stream()
         if parser.parse_args().computation_policy == "stream":
             self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
-        elif parser.parse_args().computation_policy == "alter_stream":
+        elif parser.parse_args().computation_policy == "alter_stream" or parser.parse_args().computation_policy == "optimize":
             self.stream_manager = ComputationStreamAlterManager(32)
             self.cache_loader = CacheLoaderManager(32)
 
@@ -598,7 +598,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     auto_pop = args.computation_policy == "default" or (
         args.computation_policy == "alter_stream" and args.num_gpu_batches == 1
-    )
+    ) or args.computation_policy == "optimize"
 
     assert len(args.percent) == 6
 
