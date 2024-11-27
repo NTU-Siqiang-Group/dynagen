@@ -27,8 +27,8 @@ class MultiStreamBase:
 
 
 def wait_stream_finish(f):
-    stream = f.result() 
-    if stream is not None:  
+    stream = f.result()
+    if stream is not None:
         # print("Synchronizing stream")
         stream.synchronize()
 
@@ -119,12 +119,19 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                 wait_stream_finish(cache_handle)
             layers_cache_sync[k][j] = None
             cpu_del = k % 2 == 0
+            # cpu_del = False
             this.store_hidden(i, j, k - 1)
             this.load_hidden(i, j, k + 1)
             this.compute_layer(i, j, k, cpu_delegation=cpu_del)
             this.store_cache(i, j, k - 1)
 
-        optimizer = DynagenOpt(this.num_layers, 4, this.num_gpu_batches, 512, this.execute_gen_len)
+        optimizer = DynagenOpt(
+            this.num_layers,
+            this.policy.gpu_batch_size,
+            this.num_gpu_batches,
+            this.task.prompt_len,
+            this.execute_gen_len,
+        )
         optimizer.optimize_alter_v2()
         cache_prefetch, weight_prefetch, cpu_delegation = optimizer.get_policy()
 
@@ -148,14 +155,14 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                     weight_prefetches = []
                     if (i, j, k) in weight_prefetch:
                         weight_prefetches = weight_prefetch[(i, j, k)]
-                    for (token, layer, batch) in cache_prefetches:
+                    for token, layer, batch in cache_prefetches:
                         cpu_del = cpu_delegation[(token, layer, batch)]
                         f = this.cache_loader.load_cache(True, load_layer_cache, token, layer, batch, cpu_del)
                         layers_cache_sync[batch][layer] = f
-                    for (token, layer, batch) in weight_prefetches:
+                    for token, layer, batch in weight_prefetches:
                         f = this.cache_loader.load_cache(True, load_layer_weight, token, layer, batch)
                         layers_weights_sync[batch][layer] = f
-                    
+
                     compute_layer(
                         i,
                         j,
@@ -168,6 +175,5 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
 
                     if i == 0:
                         this.sync()
-
 
             timers("generate").stop()

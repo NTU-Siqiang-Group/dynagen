@@ -67,7 +67,7 @@ class LlamaInputEmbed(InputEmbed):
         (w_token,) = weight_home.val
         if k == 0:
             dst = self.weight_load_dst
-            weight_read_buf.store((w_token.smart_copy(dst),))
+            weight_read_buf.store((w_token.smart_copy(dst if not w_token.device == self.env.gpu else self.compute),))
 
     def pop_weight(self, weight_read_buf):
         weight_read_buf.pop()
@@ -114,7 +114,12 @@ class LlamaOutputEmbed(OutputEmbed):
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
-            weight_read_buf.store((w_ln.smart_copy(dst2), w_token.smart_copy(dst1)))
+            weight_read_buf.store(
+                (
+                    w_ln.smart_copy(dst2),
+                    w_token.smart_copy(dst1 if not w_token.device == self.env.gpu else self.compute),
+                )
+            )
 
     def pop_weight(self, weight_read_buf):
         weight_read_buf.pop()
@@ -180,11 +185,11 @@ class LlamaSelfAttention(SelfAttention):
             weight_read_buf.store(
                 (
                     w_ln.smart_copy(dst2),
-                    w_q.smart_copy(dst1),
-                    w_k.smart_copy(dst1),
-                    w_v.smart_copy(dst1),
-                    w_re.smart_copy(dst1),
-                    w_o.smart_copy(dst1),
+                    w_q.smart_copy(dst1 if not w_q.device == self.env.gpu else self.compute),
+                    w_k.smart_copy(dst1 if not w_k.device == self.env.gpu else self.compute),
+                    w_v.smart_copy(dst1 if not w_v.device == self.env.gpu else self.compute),
+                    w_re.smart_copy(dst2),
+                    w_o.smart_copy(dst1 if not w_o.device == self.env.gpu else self.compute),
                 )
             )
 
@@ -302,7 +307,12 @@ class LlamaMLP(MLP):
             dst1 = self.weight_load_dst
             dst2 = self.compute
             weight_read_buf.store(
-                (w_ln.smart_copy(dst2), w_g.smart_copy(dst1), w_u.smart_copy(dst1), w_d.smart_copy(dst1))
+                (
+                    w_ln.smart_copy(dst2),
+                    w_g.smart_copy(dst1 if not w_g.device == self.env.gpu else self.compute),
+                    w_u.smart_copy(dst1 if not w_u.device == self.env.gpu else self.compute),
+                    w_d.smart_copy(dst1 if not w_d.device == self.env.gpu else self.compute),
+                )
             )
 
     def pop_weight(self, weight_read_buf):
@@ -377,7 +387,10 @@ class LlamaLM(OptLM):
         self.store_cache_stream = torch.cuda.Stream()
         if parser.parse_args().computation_policy == "stream":
             self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
-        elif parser.parse_args().computation_policy == "alter_stream" or parser.parse_args().computation_policy == "optimize":
+        elif (
+            parser.parse_args().computation_policy == "alter_stream"
+            or parser.parse_args().computation_policy == "optimize"
+        ):
             self.stream_manager = ComputationStreamAlterManager(32)
             self.cache_loader = CacheLoaderManager(32)
 
@@ -596,9 +609,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     add_parser_arguments(parser)
     args = parser.parse_args()
-    auto_pop = args.computation_policy == "default" or (
-        args.computation_policy == "alter_stream" and args.num_gpu_batches == 1
-    ) or args.computation_policy == "optimize"
+    auto_pop = (
+        args.computation_policy == "default"
+        or (args.computation_policy == "alter_stream" and args.num_gpu_batches == 1)
+        or args.computation_policy == "optimize"
+    )
 
     assert len(args.percent) == 6
 

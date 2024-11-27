@@ -1139,9 +1139,11 @@ class LlamaTorchDevice(TorchDevice):
         # decompress weights
         if w_q.device.device_type == DeviceType.COMPRESSED:
             w_q = w_q.device.decompress(w_q)
+        if w_k.device.device_type == DeviceType.COMPRESSED:
             w_k = w_k.device.decompress(w_k)
+        if w_v.device.device_type == DeviceType.COMPRESSED:
             w_v = w_v.device.decompress(w_v)
-            w_re = w_re.device.decompress(w_re)
+        if w_out.device.device_type == DeviceType.COMPRESSED:
             w_out = w_out.device.decompress(w_out)
 
         b, s, h = inputs.shape
@@ -1237,9 +1239,11 @@ class LlamaTorchDevice(TorchDevice):
         # decompress weights
         if w_q.device.device_type == DeviceType.COMPRESSED:
             w_q = w_q.device.decompress(w_q)
+        if w_k.device.device_type == DeviceType.COMPRESSED:
             w_k = w_k.device.decompress(w_k)
+        if w_v.device.device_type == DeviceType.COMPRESSED:
             w_v = w_v.device.decompress(w_v)
-            w_re = w_re.device.decompress(w_re)
+        if w_out.device.device_type == DeviceType.COMPRESSED:
             w_out = w_out.device.decompress(w_out)
 
         b, tgt_s, h = inputs.shape
@@ -1368,10 +1372,12 @@ class LlamaTorchDevice(TorchDevice):
 
     def llama_mlp(self, inputs, w_ln, w_g, w_u, w_d, eps, donate):
         # decompress weights
-        if w_ln.device.device_type == DeviceType.COMPRESSED:
+        if w_g.device.device_type == DeviceType.COMPRESSED:
             w_g = w_g.device.decompress(w_g)
-            w_u = w_g.device.decompress(w_u)
-            w_d = w_g.device.decompress(w_d)
+        if w_u.device.device_type == DeviceType.COMPRESSED:
+            w_u = w_u.device.decompress(w_u)
+        if w_d.device.device_type == DeviceType.COMPRESSED:
+            w_d = w_d.device.decompress(w_d)
 
         out = rms_norm(inputs.data, weight=w_ln.data, eps=eps)
         gate_out = F.linear(out, w_g.data)

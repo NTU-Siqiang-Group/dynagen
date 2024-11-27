@@ -132,13 +132,12 @@ def init_weight_list(weight_specs, policy, env):
                 actual_distribution[j] += sizes[i]
         shape, dtype, filename = weight_specs[i]
 
-        if len(shape) < 2:
+        if len(shape) < 2 or home == env.gpu:
             pin_memory = True
             compress = False
         else:
             pin_memory = policy.pin_weight
             compress = policy.compress_weight
-
         if not compress:
             weight = home.allocate(shape, dtype, pin_memory=pin_memory)
 
@@ -193,7 +192,12 @@ class InputEmbed:
         w_token, w_pos = weight_home.val
         if k == 0:
             dst = self.weight_load_dst
-            weight_read_buf.store((w_token.smart_copy(dst), w_pos.smart_copy(dst)))
+            weight_read_buf.store(
+                (
+                    w_token.smart_copy(dst if not w_token.device == self.env.gpu else self.compute),
+                    w_pos.smart_copy(dst if not w_pos.device == self.env.gpu else self.compute),
+                )
+            )
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
@@ -264,7 +268,13 @@ class OutputEmbed:
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
-            weight_read_buf.store((w_ln.smart_copy(dst2), b_ln.smart_copy(dst2), w_token.smart_copy(dst1)))
+            weight_read_buf.store(
+                (
+                    w_ln.smart_copy(dst2),
+                    b_ln.smart_copy(dst2),
+                    w_token.smart_copy(dst1 if not w_token.device == self.env.gpu else self.compute),
+                )
+            )
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
@@ -348,13 +358,13 @@ class SelfAttention:
             dst2 = self.compute
             weight_read_buf.store(
                 (
-                    w_q.smart_copy(dst1),
+                    w_q.smart_copy(dst1 if not w_q.device == self.env.gpu else self.compute),
                     b_q.smart_copy(dst2),
-                    w_k.smart_copy(dst1),
+                    w_k.smart_copy(dst1 if not w_k.device == self.env.gpu else self.compute),
                     b_k.smart_copy(dst2),
-                    w_v.smart_copy(dst1),
+                    w_v.smart_copy(dst1 if not w_v.device == self.env.gpu else self.compute),
                     b_v.smart_copy(dst2),
-                    w_out.smart_copy(dst1),
+                    w_out.smart_copy(dst1 if not w_out.device == self.env.gpu else self.compute),
                     b_out.smart_copy(dst2),
                     w_ln.smart_copy(dst2),
                     b_ln.smart_copy(dst2),
@@ -377,7 +387,7 @@ class SelfAttention:
 
         cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
         cache_home.store(cache)
-    
+
     def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
         if i == 0:  # prefill, no cache
             return
@@ -565,12 +575,14 @@ class SelfAttention:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, cpu_delegation=None):
+    def forward(
+        self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, cpu_delegation=None
+    ):
         n_head = self.config.n_head
         if not cpu_delegation is None:
-          attention_compute = self.env.cpu if cpu_delegation else self.env.gpu
+            attention_compute = self.env.cpu if cpu_delegation else self.env.gpu
         else:
-          attention_compute = self.attention_compute
+            attention_compute = self.attention_compute
         donate = [False] * 14
         h, donate[0] = hidden.val, True
         if isinstance(attention_mask, tuple):
@@ -702,9 +714,9 @@ class MLP:
             dst2 = self.compute
             weight_read_buf.store(
                 (
-                    wi.smart_copy(dst1),
+                    wi.smart_copy(dst1 if not wi.device == self.env.gpu else self.compute),
                     bi.smart_copy(dst2),
-                    wo.smart_copy(dst1),
+                    wo.smart_copy(dst1 if not wo.device == self.env.gpu else self.compute),
                     bo.smart_copy(dst2),
                     w_ln.smart_copy(dst2),
                     b_ln.smart_copy(dst2),
@@ -716,10 +728,10 @@ class MLP:
 
     def load_cache(self, cache_home, cache_read_buf, i):
         pass  # do nothing
-    
+
     def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
         pass
-    
+
     def store_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
 
@@ -800,7 +812,7 @@ class OptLM:
         self.path = path
         self.policy = policy
         self.num_gpu_batches = policy.num_gpu_batches
-        self.computation_policy = get_computation_policy('stream')
+        self.computation_policy = get_computation_policy("stream")
 
         layers = []
         layers.append(InputEmbed(self.config, self.env, self.policy))
@@ -827,7 +839,7 @@ class OptLM:
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
-        
+
         self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
 
         # Intermediate tensors
@@ -878,13 +890,13 @@ class OptLM:
             self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
 
     def pop_weight(self, i, j, k):
-      if j == self.num_layers:
+        if j == self.num_layers:
             j = 0
             i += 1
             if i == self.execute_gen_len:
                 return
-      self.layers[j].pop_weight(self.weight_read_buf[j])
-      
+        self.layers[j].pop_weight(self.weight_read_buf[j])
+
     def delete_weight(self, j, k):
         if k == 0:
             for x in self.weight_home[j].pop():
@@ -916,7 +928,7 @@ class OptLM:
                 self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
         else:
             self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
-    
+
     def load_cache_dyn(self, i, j, k, load_to_cpu=False):
         if not self.layers[j % self.num_layers].need_cache:
             return
