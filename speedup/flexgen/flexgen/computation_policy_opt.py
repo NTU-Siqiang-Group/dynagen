@@ -4,7 +4,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 from concurrent.futures import ThreadPoolExecutor
-from flexgen.optimize import DynagenOpt
+from flexgen.optimize.dynagen_optimize import DynagenOpt
 
 
 class MultiStreamBase:
