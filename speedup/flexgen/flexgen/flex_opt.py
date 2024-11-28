@@ -132,7 +132,7 @@ def init_weight_list(weight_specs, policy, env):
                 actual_distribution[j] += sizes[i]
         shape, dtype, filename = weight_specs[i]
 
-        if len(shape) < 2:
+        if len(shape) < 2 or home == env.gpu:
             pin_memory = True
             compress = False
         else:
