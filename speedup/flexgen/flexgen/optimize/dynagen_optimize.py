@@ -1,7 +1,7 @@
 import numpy as np
 import copy
 
-from network_config import ProfilerConfig
+from flexgen.optimize.network_config import ProfilerConfig
 
 class DynagenOpt:
     def __init__(self, num_layers, batch_size, num_gpu_batches, prompt_len, gen_len, profiler=ProfilerConfig()):
@@ -12,7 +12,7 @@ class DynagenOpt:
         self.gen_len = gen_len
 
         self.profiler = profiler # for one layer, placeholder
-        self.weights_size = self.profiler.get_weights()
+        # self.weights_size = self.profiler.get_weights()
 
         # Assumption 2: the batch can fully saturate the visual memory.
         # 1. Prefetch & offload policy
@@ -294,11 +294,11 @@ class DynagenOpt:
                             token = i + 1
                         if token >= self.gen_len:
                             continue
-                        if layers_weights_sync[batch][layer] is None and loading_weights < self.num_gpu_batches * 5:
+                        if layers_weights_sync[batch][layer] is None and loading_weights < self.num_gpu_batches * 4:
                             self.weight_prefetch[self._idx(token, layer, batch)] = self._idx(i, j, k)
                             layers_weights_sync[batch][layer] = 1
                             loading_weights += 1
-                        if layers_cache_sync[batch][layer] is None and loading_caches < 15:
+                        if layers_cache_sync[batch][layer] is None and loading_caches < 4:
                             self.cache_prefetch[self._idx(token, layer, batch)] = self._idx(i, j, k)
                             self.cpu_delegation[self._idx(token, layer, batch)] = batch % 2 == 0
                             layers_cache_sync[batch][layer] = 1
