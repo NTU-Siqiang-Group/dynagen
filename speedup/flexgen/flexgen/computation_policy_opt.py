@@ -113,12 +113,14 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.load_cache_dyn(i, j, k, load_to_cpu=load_to_cpu)
 
         def compute_layer(i, j, k, weight_handle, cache_handle, layers_weights_sync, layers_cache_sync):
-            wait_stream_finish(weight_handle)
+            if weight_handle is not None:
+                wait_stream_finish(weight_handle)
             layers_weights_sync[k][j] = None
             if this.layers[j].need_cache:
                 wait_stream_finish(cache_handle)
             layers_cache_sync[k][j] = None
-            cpu_del = k % 2 == 0
+            # cpu_del = k % 2 == 0
+            cpu_del = True
             # cpu_del = False
             this.store_hidden(i, j, k - 1)
             this.load_hidden(i, j, k + 1)
@@ -132,7 +134,8 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.task.prompt_len,
             this.execute_gen_len,
         )
-        optimizer.optimize_alter_v2()
+        # optimizer.optimize_alter_v2()
+        optimizer.optimize_default()
         cache_prefetch, weight_prefetch, cpu_delegation = optimizer.get_policy()
 
         layers_weights_sync = [[None for _ in range(this.num_layers)] for _ in range(this.num_gpu_batches)]

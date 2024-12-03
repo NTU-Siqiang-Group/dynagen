@@ -90,3 +90,12 @@ class DynagenOpt:
           # compute
           layers_weights_sync[k][j] = None
           layers_cache_sync[k][j] = None
+  
+  def optimize_default(self):
+    for i in range(self.gen_len):
+        for j in range(self.num_layers):
+            for k in range(self.num_gpu_batches):
+                if k == 0:
+                    self.weight_prefetch[self._idx(i, j, k)] = self._idx(i, j - 1, k)
+                self.cache_prefetch[self._idx(i, j, k)] = self._idx(i, j, k - 1)
+                self.cpu_delegation[self._idx(i, j, k)] = 1
