@@ -1,3 +1,4 @@
+from math import ceil
 import numpy as np
 import copy
 
@@ -23,14 +24,14 @@ class DynagenOpt:
         self.profiler = profiler # for one layer, placeholder
         self.weights_size = self.profiler.get_weights()
 
-        # Assumption 2: the batch can fully saturate the visual memory.
+        # Assumption 2: the batch can fully saturate the GPU memory.
         # 1. Prefetch & offload policy
         #   - KV cache
         #   - Weight
         self.mem_consumption = np.array([None] * gen_len * num_layers * num_gpu_batches) # token * num_batches
-        self.cache_prefetch = np.array([None] * gen_len * num_layers * num_gpu_batches) # at which time the cache is fetched
+        self.cache_prefetch = np.array([None] * gen_len * num_layers * num_gpu_batches) # at which "step" the cache is fetched
         # only (i, j, 0) is valid for weight prefetch
-        self.weight_prefetch = np.array([None] * gen_len * num_layers * num_gpu_batches) # at which time the weight is fetched
+        self.weight_prefetch = np.array([None] * gen_len * num_layers * num_gpu_batches) # at which "step" the weight is fetched
         # 2. TODO: KV cache percentage and weight percentage (initial value, they are fetched into the buffer gradually
         #   according to the prefetch policy). Currently assume both of them are stored in CPU memory.
         # 3. CPU delegation
@@ -38,8 +39,8 @@ class DynagenOpt:
         self.cpu_delegation = np.array([0] * gen_len * num_layers * num_gpu_batches) # which batch should be submitted to 
         # TODO: considering compute two batch at a time. One in GPU and one in CPU
 
-        self.weight_percent = np.array([0] * num_layers)
-        self.cache_percent = np.array([0] * num_layers)
+        self.weight_percent = np.zeros(num_layers)
+        self.cache_percent = np.zeros(num_layers)
         # GA hyperparameters
         self.mutate_rate = 0.05
         self.cross_rate = 0.5
@@ -413,3 +414,325 @@ class DynagenOpt:
                     layers_weights_sync[k][j] = None
                     layers_cache_sync[k][j] = None
 
+
+# Greedy / DP?:
+# 1. 只有奇数层，且不是最后一层需要cache
+# 2. 推论：[i, j, k]需要的cache只可以在 >= [i-1, j, k+1] 且 < [i, j, k]的step被prefetch
+# 3. 第 [i, j, k] "step" **可以且只可以** prefetch之后任意 **一整层** 的weight，假设在[0, 0, 0]prefetch了第1层的weight，那weight_prefetch[0, 1, 0] = 0。特别地，[0, 0, k]的weight通常已被预加载，无需考虑。
+# 4. 推论：[i, j, 0]需要的weight只可以在 >= [i-1, j+1, 0] 且 < [i, j, 0]的step被prefetch
+# 5. weight必须被prefetch到GPU；但cache可以不被prefetch到GPU，此时需要使用cpu_delegation
+# 6. cache在下一个batch被offload，weight在下一个layer的第0个batch被offload
+# 7. 推论：第[0, 0, k] "step" 的latency只取决于：compute<-是否cpu_delegation
+# 8. 加入对GPU memory的大小限制
+# 9. 假设：在一个"step"里prefetch再多的weight或cache都不会影响这个"step"的latency，只会影响它的mem_consumption
+# 10. 假设：weight_percent_gpu = 0, cache_percent_gpu = 0
+# 11. 数据结构：
+#   "items" / "steps" :=
+#       +----------+---------------------------------------+
+#       |0         |WWCCCCC...CCWWCCCCC...CCWWCCCCC...CCWW |
+#       +----------+---------------------------------------+
+#       |1         |WWCCCCC...CCWWCCCCC...CCWWCCCCC...CCWW |
+#       +----------+---------------------------------------+
+#       |...       |...                                    |
+#       +----------+---------------------------------------+
+#       |gen_len-1 |WWCCCCC...CCWWCCCCC...CCWWCCCCC...CCWW |
+#       +----------+---------------------------------------+
+#   gpu_memory_capacity: int    # 显存容量（GiB）
+#   cache_count = gen_len * ceil((num_layers - 2) / 2) * num_gpu_batches
+#   weight_count = gen_len * num_layers
+#   latency = np.full((cache_count + weight_count + 1, gpu_memory_capacity + 1), -np.inf)
+#   prefetch = np.empty(n)      # 一个step应该在哪个step被prefetch
+#   mem_consumption_cumsum先填入每个"item"的大小（Byte），再计算前缀和，最后转换为GiB
+# 12. 初始化：
+# latency[0] = 00000...0 -> 不计时的weight prefetch "base step"
+# latency[i][0...gpu_memory_lower_bound-1] = 0
+
+# latency[i] = latency[i - 1] + max(weight_loading_finished[i] - latency[i - 1], 0)
+#                             + max(cache_loading_finished[i] - latency[i - 1], 0) + compute[i]
+# min(latency[-1])
+
+# for seg_idx, start, end, is_weight in self.steps:
+#   for c in range(start, end):
+#       for r in range(gpu_memory_lower_bound, self.gpu_memory_capacity + 1):
+#           if r < get_mem_consumption(c, is_weight, start - 1):
+#               assert not is_weight  # gpu_memory_lower_bound should guarantee that GPU is at least capable of holding the weight
+#               latency[c][r] = latency[c - 1][r] - get_compute(c, True)  # CPU delegation
+#           else:
+#               if is_weight:
+#                   f_seg_idx = seg_idx if c - 1 >= start else seg_idx - 1
+#                   for _, i_start, i_end, is_i_weight in self.steps.riter(f_seg_idx, c - 1, get_weight_prefetch_lower_bound(c)):
+#                       for i in range(i_end - 1, i_start - 1, -1):
+#                           mem_consumption_segsum = get_mem_consumption_segsum(i, c, is_i_weight, i_start - 1)
+#                           if r < mem_consumption_segsum:
+#                               break
+#                           weight_loading_latency = min(get_weight_loading_finished(i, c) + latency[c - 1][r - mem_consumption_segsum], 0)
+#                           new_latency = latency[c - 1][r - mem_consumption_segsum] - weight_loading_latency - get_compute(c)
+#                           if latency[c][r] < new_latency:
+#                               latency[c][r] = new_latency
+#                               prefetch[c] = i
+#                   continue
+# 
+#               weight_step = start - 1
+#               if r < get_mem_consumption(weight_step, True):
+#                   continue
+# 
+#               latency[c][r] = latency[c - 1][r] - get_compute(c, True)
+#               f_seg_idx = seg_idx if c - 1 >= start else seg_idx - 1
+#               for _, i_start, i_end, is_i_weight in self.steps.riter(f_seg_idx, c - 1, get_cache_prefetch_lower_bound(c)):
+#                   for i in range(i_end - 1, i_start - 1, -1):
+#                       mem_consumption_segsum = get_mem_consumption_segsum(i, c, is_i_weight, i_start - 1)
+#                       if r < mem_consumption_segsum:
+#                           break
+#                       cache_loading_latency = min(get_cache_loading_finished(i, c) + latency[c - 1][r - mem_consumption_segsum], 0)
+#                       new_latency = latency[c - 1][r - mem_consumption_segsum] - cache_loading_latency - get_compute(c, False)
+#                       if latency[c][r] < new_latency:
+#                           latency[c][r] = new_latency
+#                           prefetch[c] = i
+
+class DynagenOptDP:
+    class BinaryIndexedTree:
+        def __init__(self, size):
+            self.size = size
+            self.tree = np.zeros(size + 1)
+
+        def update(self, index, delta):
+            assert index > 0
+            while index <= self.size:
+                self.tree[index] += delta
+                index += index & (-index)
+
+        def get_cumsum(self, index):
+            result = 0
+            while index > 0:
+                result += self.tree[index]
+                index -= index & (-index)
+            return result
+
+
+    class Steps:
+        def __init__(self, steps, num_layers):
+            self.steps = steps
+            self.num_layers = num_layers
+
+        def __iter__(self):
+            start = 0
+            for i, end in enumerate(self.steps):
+                yield (i, start, end, i % 2 == 0)  # seg_idx, start, end, is_weight
+                start = end
+
+        def riter(self, seg_idx, lower_bound):
+            while seg_idx >= 0:
+                start = self.steps[seg_idx - 1] if seg_idx > 0 else 0
+                end = self.steps[seg_idx]
+                yield (seg_idx, start, end, seg_idx % 2 == 0)  # seg_idx, start, end, is_weight
+                if start <= lower_bound:
+                    break
+                seg_idx -= 1
+
+
+    def __init__(self, num_layers, batch_size, num_gpu_batches, prompt_len, gen_len, gpu_memory_capacity, profiler=ProfilerConfig()):
+        self.num_layers = num_layers
+        self.batch_size = batch_size
+        self.num_gpu_batches = num_gpu_batches
+
+        cache_count = gen_len * ceil((num_layers - 2) / 2) * num_gpu_batches
+        weight_count = gen_len * num_layers
+        self.n = cache_count + weight_count
+        self.step_per_token = self.n // gen_len
+        self.gpu_memory_capacity = gpu_memory_capacity
+
+        steps = np.empty((num_layers - 1) + (num_layers - 2) * (gen_len - 1), np.uint32)
+        start = 0
+        for seg_idx in range(len(steps)):
+            if seg_idx > 0 and seg_idx < len(steps) - 1 and seg_idx % (num_layers - 2) == 0:
+                steps[seg_idx] = start + 4
+                start = steps[seg_idx]
+                continue
+            if seg_idx % 2 == 0:
+                steps[seg_idx] = start + 2
+                start = steps[seg_idx]
+                continue
+            steps[seg_idx] = start + num_gpu_batches
+            start = steps[seg_idx]
+        self.steps = self.Steps(steps, num_layers)
+
+        mem_consumption = np.empty(self.n + 1, np.uint32)
+        mem_consumption[0] = 0
+        weight_sizes = np.array(profiler.get_weights())
+        i, j = 0, 0
+        for seg_idx, start, end, is_weight in self.steps:
+            if not is_weight:
+                mem_consumption[start + 1:end + 1] = profiler.get_cache_size(batch_size, prompt_len + i)
+                continue
+            for c in range(start, end):
+                if j == num_layers - 1:
+                    mem_consumption[c+1] = weight_sizes[j]
+                    i += 1
+                    j = 0
+                else:
+                    mem_consumption[c+1] = weight_sizes[j]
+                    j += 1
+        self.mem_consumption_cumsum = np.cumsum(mem_consumption).astype(np.uint64)
+        weight_sizes = weight_sizes + np.insert(weight_sizes[:-1], 0, 0)
+        self.gpu_memory_lower_bound = np.ceil(np.max(weight_sizes) / (1 << 30)).astype(np.int32)
+
+        self.latency = np.full((self.n + 1, gpu_memory_capacity + 1), -np.inf)
+        self.latency[0] = 0
+        self.prefetch = np.full(self.n + 1, -1, np.int32)
+        self.io_costs = self.BinaryIndexedTree(self.n)  # 某一步的io部分需要的时间组成的线段数组
+        self.profiler = profiler
+
+    def _decode(self, c):
+        i = c // self.step_per_token
+
+        if c % self.step_per_token >= self.step_per_token - 2:
+            seg_idx = (self.num_layers - 2) * (i + 1)
+            is_weight = True
+        else:
+            seg_idx = (self.num_layers - 2) * i + (c % self.step_per_token) // (2 + self.num_gpu_batches) * 2
+            is_weight = (c % self.step_per_token) % (2 + self.num_gpu_batches) < 2
+            if not is_weight:
+                seg_idx += 1
+        start = 0 if seg_idx == 0 else self.steps.steps[seg_idx - 1]
+
+        k = 0 if is_weight else c - start
+
+        if c % self.step_per_token >= self.step_per_token - 2:
+            seg_idx = self.num_layers - 2
+        else:
+            seg_idx %= self.num_layers - 2
+        j = seg_idx if not is_weight else seg_idx + c - start
+        return int(i), int(j), int(k)
+
+    def get_mem_consumption(self, c, is_weight, weight_step=None):
+        if not is_weight and weight_step is not None:
+            result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[c - 1] + self.mem_consumption_cumsum[weight_step] - self.mem_consumption_cumsum[weight_step - 1]
+        else:
+            result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[c - 1]
+        return int(np.ceil(result / (1 << 30)))
+
+    def get_mem_consumption_segsum(self, i, c, is_i_weight, weight_step=None):
+        if not is_i_weight and weight_step is not None:
+            result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[i - 1] + self.mem_consumption_cumsum[weight_step] - self.mem_consumption_cumsum[weight_step - 1]
+        else:
+            result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[i - 1]
+        return int(np.ceil(result / (1 << 30)))
+
+    def get_compute(self, is_weight, cpu_del=False):
+        if is_weight:
+            assert not cpu_del
+            return self.profiler.get_compute_mlp_gpu()
+        if cpu_del:
+            return self.profiler.get_compute_cache_cpu()
+        return self.profiler.get_compute_cache_gpu()
+
+    def get_weight_prefetch_lower_bound(self, c, is_seg_end):
+        if is_seg_end:
+            return max(c - self.step_per_token + self.num_gpu_batches + 1, 0)
+        return max(c - self.step_per_token + 1, 0)
+
+    def get_weight_loading_finished(self, prefetch_step, c):
+        return self.io_costs.get_cumsum(prefetch_step) + self.profiler.get_htod_cost(self.get_mem_consumption(c, True) << 30)
+
+    def get_cache_prefetch_lower_bound(self, c):
+        return max(c - self.step_per_token + 1, 0)
+
+    def get_cache_loading_finished(self, prefetch_step, c):
+        return self.io_costs.get_cumsum(prefetch_step) + self.profiler.get_htod_cost(self.get_mem_consumption(c, False) << 30)
+
+    def update_io_costs(self, c, is_weight):
+        prefetch_step = self.prefetch[c]
+        cpu_del = prefetch_step == -1
+        if not cpu_del:
+            self.io_costs.update(prefetch_step + 1, self.profiler.get_htod_cost(self.get_mem_consumption(c + 1, is_weight) << 30))
+        if not is_weight:
+            if cpu_del:
+                self.io_costs.update(c + 1, self.profiler.get_dtoh_cost(self.profiler.get_cache_size(self.batch_size, 1)))
+            else:
+                self.io_costs.update(c + 1, self.profiler.get_dtoh_cost(self.get_mem_consumption(c + 1, False) << 30))
+
+    def optimize(self):
+        for seg_idx, start, end, is_weight in self.steps:
+            for c in range(start, end):
+                for r in range(self.gpu_memory_capacity, max(-1, self.gpu_memory_lower_bound - 2), -1):
+                    if r < self.get_mem_consumption(c + 1, is_weight, start):
+                        if c == 0:
+                            continue
+                        if self.prefetch[c] != -1:
+                            self.update_io_costs(c, is_weight)
+                        else:
+                            assert not is_weight  # gpu_memory_lower_bound should guarantee that GPU is at least capable of holding the weight
+                            self.latency[c + 1][r] = self.latency[c][r] - self.get_compute(is_weight, True)  # CPU delegation
+                    else:
+                        if is_weight:
+                            _c = max(c - 1, 0)
+                            f_seg_idx = seg_idx if _c >= start else seg_idx - 1
+                            weight_prefetch_lower_bound = self.get_weight_prefetch_lower_bound(c, c == end - 1)
+                            for _, i_start, i_end, is_i_weight in self.steps.riter(f_seg_idx, weight_prefetch_lower_bound):
+                                for i in range(min(_c, i_end - 1), max(weight_prefetch_lower_bound - 1, i_start - 1), -1):
+                                    mem_consumption_segsum = self.get_mem_consumption_segsum(i + 1, c + 1, is_i_weight, i_start)
+                                    if r < mem_consumption_segsum:
+                                        self.update_io_costs(c, is_weight)
+                                        break
+                                    weight_loading_finished = self.get_weight_loading_finished(i + 1, c + 1)
+                                    _r = 1 if r - mem_consumption_segsum == 0 else max(0, r - mem_consumption_segsum)
+                                    weight_loading_latency = min(weight_loading_finished + self.latency[c][_r], 0)
+                                    new_latency = self.latency[c][_r] + weight_loading_latency - self.get_compute(is_weight)
+                                    if self.latency[c + 1][r] < new_latency:
+                                        self.latency[c + 1][r] = new_latency
+                                        if r == self.gpu_memory_capacity:
+                                            self.prefetch[c] = i
+                            continue
+
+                        weight_step = start - 1
+                        mem_consumption = self.get_mem_consumption(weight_step + 1, True)
+                        if r < mem_consumption:
+                            continue
+                        _r = 1 if r - mem_consumption == 0 else max(0, r - mem_consumption)
+                        self.latency[c + 1][_r] = self.latency[c][_r] - self.get_compute(is_weight, True)
+
+                        f_seg_idx = seg_idx if c - 1 >= start else seg_idx - 1
+                        cache_prefetch_lower_bound = self.get_cache_prefetch_lower_bound(c)
+                        for _, i_start, i_end, is_i_weight in self.steps.riter(f_seg_idx, cache_prefetch_lower_bound):
+                            for i in range(min(c - 1, i_end - 1), max(cache_prefetch_lower_bound - 1, i_start - 1), -1):
+                                mem_consumption_segsum = self.get_mem_consumption_segsum(i + 1, c + 1, is_i_weight, i_start)
+                                if r < mem_consumption_segsum:
+                                    self.update_io_costs(c, is_weight)
+                                    break
+                                cache_loading_finished = self.get_cache_loading_finished(i + 1, c + 1)
+                                _r = 1 if r - mem_consumption_segsum == 0 else max(0, r - mem_consumption_segsum)
+                                cache_loading_latency = min(cache_loading_finished + self.latency[c][_r], 0)
+                                new_latency = self.latency[c][_r] + cache_loading_latency - self.get_compute(is_weight, False)
+                                if self.latency[c + 1][r] < new_latency:
+                                    self.latency[c + 1][r] = new_latency
+                                    if r == self.gpu_memory_capacity:
+                                        self.prefetch[c] = i
+
+    def get_policy(self):
+        cache_prefetch = {}
+        weight_prefetch = {}
+        cpu_delegation = {}
+        i, j = 0, 0
+        for _, start, end, is_weight in self.steps:
+            if not is_weight:
+                k = 0
+                for c in range(start, end):
+                    prefetch_step = self.prefetch[c]
+                    if prefetch_step == -1:
+                        cpu_delegation[(i, j - 1, k)] = 1
+                    else:
+                        cpu_delegation[(i, j - 1, k)] = 0
+                        cache_prefetch.setdefault(self._decode(prefetch_step), []).append((i, j - 1, k))
+                    k += 1
+                continue
+            for c in range(start, end):
+                prefetch_step = self.prefetch[c]
+                assert prefetch_step != -1
+                weight_prefetch.setdefault(self._decode(prefetch_step), []).append((i, j, 0))
+                if j == self.num_layers - 1:
+                    i += 1
+                    j = 0
+                else:
+                    j += 1
+
+        return cache_prefetch, weight_prefetch, cpu_delegation

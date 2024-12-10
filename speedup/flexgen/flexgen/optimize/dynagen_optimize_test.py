@@ -1,10 +1,10 @@
-from dynagen_optimize import DynagenOpt
+from dynagen_optimize import DynagenOpt, DynagenOptDP
 from network_config import Llama1BConfig
 
 def summarize_policy(gen_len, num_layers, num_batches, opt):
     cache, weight, cpu_del = opt.get_policy()
     mem_consumption = opt.get_mem_consumption_full(
-        opt.cache_prefetch, opt.weight_prefetch, opt.cpu_delegation
+        opt.cache_prefetch, opt.weight_prefetch, opt.cpu_delegation, opt.weight_percent, opt.cache_percent
     )
     print('token|layer|batch|fetch_cache|fetch_weight|use_cpu_del|memory(MB)')
     idx = 0
@@ -22,6 +22,8 @@ def summarize_policy(gen_len, num_layers, num_batches, opt):
 
 if __name__ == "__main__":
     llama_config = Llama1BConfig()
-    opt = DynagenOpt(len(llama_config.get_weights()), 4, 16, 512, 32, llama_config)
-    opt.optimize(20)
-    # summarize_policy(32, len(llama_config.get_weights()), 16, opt)
+    # opt = DynagenOpt(len(llama_config.get_weights()), 4, 16, 512, 32, llama_config)
+    opt = DynagenOptDP(len(llama_config.get_weights()), 4, 16, 512, 32, 24, llama_config)
+    # opt.optimize(20)
+    opt.optimize()
+    summarize_policy(32, len(llama_config.get_weights()), 16, opt)
