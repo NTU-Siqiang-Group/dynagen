@@ -21,7 +21,7 @@ def summarize_policy(gen_len, num_layers, num_batches, opt):
                 idx += 1
 
 if __name__ == "__main__":
-    llama_config = Llama1BConfig()
+    llama_config = Llama13BConfig()
     # opt = DynagenOpt(len(llama_config.get_weights()), 4, 16, 512, 32, llama_config)
     opt = DynagenOptDP(len(llama_config.get_weights()), 8, 8, 512, 1, 24, llama_config)
     # opt.optimize(20)

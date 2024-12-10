@@ -544,7 +544,7 @@ class DynagenOptDP:
 
         self.latency = np.full((self.n + 1, gpu_memory_capacity + 1), -np.inf)  # Counts from 1
         self.latency[0] = 0
-        self.prefetch = np.full(self.n + 1, -1, np.int32)  # Counts from 1
+        self.prefetch = np.full(self.n + 1, -1, np.int32)  # Counts from 0
         self.io_costs = self.BinaryIndexedTree(self.n)  # 某一步的io部分需要的时间组成的线段数组
         self.profiler = profiler
 
@@ -568,6 +568,8 @@ class DynagenOptDP:
             seg_idx = self.num_layers - 2
         else:
             seg_idx %= self.num_layers - 2
+            if i > 0 and c % self.step_per_token < 2:
+                start += 2
         j = seg_idx if not is_weight else seg_idx + c - start
         return int(i), int(j), int(k)
 
@@ -663,12 +665,13 @@ class DynagenOptDP:
                         if r < mem_consumption:
                             continue
                         _r = 1 if r - mem_consumption == 0 else max(0, r - mem_consumption)
-                        self.latency[c + 1][_r] = self.latency[c][_r] - self.get_compute(is_weight, True)
+                        self.latency[c + 1][r] = self.latency[c][_r] - self.get_compute(is_weight, True)
 
                         f_seg_idx = seg_idx if c - 1 >= start else seg_idx - 1
                         cache_prefetch_lower_bound = self.get_cache_prefetch_lower_bound(c)
+                        cache_prefetch_upper_bound = c - 1 if c > start else start - 2
                         for _, i_start, i_end, is_i_weight in self.steps.riter(f_seg_idx, cache_prefetch_lower_bound):
-                            for i in range(min(c - 1, i_end - 1), max(cache_prefetch_lower_bound - 1, i_start - 1), -1):
+                            for i in range(min(cache_prefetch_upper_bound, i_end - 1), max(cache_prefetch_lower_bound - 1, i_start - 1), -1):
                                 mem_consumption_segsum = self.get_mem_consumption_segsum(i + 1, c + 1, is_i_weight, i_start)
                                 if r < mem_consumption_segsum:
                                     self.update_io_costs(c, is_weight)
