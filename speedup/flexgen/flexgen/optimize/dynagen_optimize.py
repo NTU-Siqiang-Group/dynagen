@@ -451,45 +451,9 @@ class DynagenOpt:
 #                             + max(cache_loading_finished[i] - latency[i - 1], 0) + compute[i]
 # min(latency[-1])
 
-# for seg_idx, start, end, is_weight in self.steps:
-#   for c in range(start, end):
-#       for r in range(gpu_memory_lower_bound, self.gpu_memory_capacity + 1):
-#           if r < get_mem_consumption(c, is_weight, start - 1):
-#               assert not is_weight  # gpu_memory_lower_bound should guarantee that GPU is at least capable of holding the weight
-#               latency[c][r] = latency[c - 1][r] - get_compute(c, True)  # CPU delegation
-#           else:
-#               if is_weight:
-#                   f_seg_idx = seg_idx if c - 1 >= start else seg_idx - 1
-#                   for _, i_start, i_end, is_i_weight in self.steps.riter(f_seg_idx, c - 1, get_weight_prefetch_lower_bound(c)):
-#                       for i in range(i_end - 1, i_start - 1, -1):
-#                           mem_consumption_segsum = get_mem_consumption_segsum(i, c, is_i_weight, i_start - 1)
-#                           if r < mem_consumption_segsum:
-#                               break
-#                           weight_loading_latency = min(get_weight_loading_finished(i, c) + latency[c - 1][r - mem_consumption_segsum], 0)
-#                           new_latency = latency[c - 1][r - mem_consumption_segsum] - weight_loading_latency - get_compute(c)
-#                           if latency[c][r] < new_latency:
-#                               latency[c][r] = new_latency
-#                               prefetch[c] = i
-#                   continue
-# 
-#               weight_step = start - 1
-#               if r < get_mem_consumption(weight_step, True):
-#                   continue
-# 
-#               latency[c][r] = latency[c - 1][r] - get_compute(c, True)
-#               f_seg_idx = seg_idx if c - 1 >= start else seg_idx - 1
-#               for _, i_start, i_end, is_i_weight in self.steps.riter(f_seg_idx, c - 1, get_cache_prefetch_lower_bound(c)):
-#                   for i in range(i_end - 1, i_start - 1, -1):
-#                       mem_consumption_segsum = get_mem_consumption_segsum(i, c, is_i_weight, i_start - 1)
-#                       if r < mem_consumption_segsum:
-#                           break
-#                       cache_loading_latency = min(get_cache_loading_finished(i, c) + latency[c - 1][r - mem_consumption_segsum], 0)
-#                       new_latency = latency[c - 1][r - mem_consumption_segsum] - cache_loading_latency - get_compute(c, False)
-#                       if latency[c][r] < new_latency:
-#                           latency[c][r] = new_latency
-#                           prefetch[c] = i
 
 class DynagenOptDP:
+    # Counts from 1
     class BinaryIndexedTree:
         def __init__(self, size):
             self.size = size
@@ -509,6 +473,7 @@ class DynagenOptDP:
             return result
 
 
+    # Counts from 0
     class Steps:
         def __init__(self, steps, num_layers):
             self.steps = steps
@@ -572,16 +537,17 @@ class DynagenOptDP:
                 else:
                     mem_consumption[c+1] = weight_sizes[j]
                     j += 1
-        self.mem_consumption_cumsum = np.cumsum(mem_consumption).astype(np.uint64)
+        self.mem_consumption_cumsum = np.cumsum(mem_consumption).astype(np.uint64)  # Counts from 1
         weight_sizes = weight_sizes + np.insert(weight_sizes[:-1], 0, 0)
         self.gpu_memory_lower_bound = np.ceil(np.max(weight_sizes) / (1 << 30)).astype(np.int32)
 
-        self.latency = np.full((self.n + 1, gpu_memory_capacity + 1), -np.inf)
+        self.latency = np.full((self.n + 1, gpu_memory_capacity + 1), -np.inf)  # Counts from 1
         self.latency[0] = 0
-        self.prefetch = np.full(self.n + 1, -1, np.int32)
+        self.prefetch = np.full(self.n + 1, -1, np.int32)  # Counts from 1
         self.io_costs = self.BinaryIndexedTree(self.n)  # 某一步的io部分需要的时间组成的线段数组
         self.profiler = profiler
 
+    # Counts from 0
     def _decode(self, c):
         i = c // self.step_per_token
 
@@ -604,6 +570,7 @@ class DynagenOptDP:
         j = seg_idx if not is_weight else seg_idx + c - start
         return int(i), int(j), int(k)
 
+    # Counts from 1
     def get_mem_consumption(self, c, is_weight, weight_step=None):
         if not is_weight and weight_step is not None:
             result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[c - 1] + self.mem_consumption_cumsum[weight_step] - self.mem_consumption_cumsum[weight_step - 1]
@@ -611,6 +578,7 @@ class DynagenOptDP:
             result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[c - 1]
         return int(np.ceil(result / (1 << 30)))
 
+    # Counts from 1
     def get_mem_consumption_segsum(self, i, c, is_i_weight, weight_step=None):
         if not is_i_weight and weight_step is not None:
             result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[i - 1] + self.mem_consumption_cumsum[weight_step] - self.mem_consumption_cumsum[weight_step - 1]
@@ -626,20 +594,25 @@ class DynagenOptDP:
             return self.profiler.get_compute_cache_cpu()
         return self.profiler.get_compute_cache_gpu()
 
+    # Counts from 0
     def get_weight_prefetch_lower_bound(self, c, is_seg_end):
         if is_seg_end:
             return max(c - self.step_per_token + self.num_gpu_batches + 1, 0)
         return max(c - self.step_per_token + 1, 0)
 
+    # Counts from 1
     def get_weight_loading_finished(self, prefetch_step, c):
         return self.io_costs.get_cumsum(prefetch_step) + self.profiler.get_htod_cost(self.get_mem_consumption(c, True) << 30)
 
+    # Counts from 0
     def get_cache_prefetch_lower_bound(self, c):
         return max(c - self.step_per_token + 1, 0)
 
+    # Counts from 1
     def get_cache_loading_finished(self, prefetch_step, c):
         return self.io_costs.get_cumsum(prefetch_step) + self.profiler.get_htod_cost(self.get_mem_consumption(c, False) << 30)
 
+    # Counts from 0
     def update_io_costs(self, c, is_weight):
         prefetch_step = self.prefetch[c]
         cpu_del = prefetch_step == -1
