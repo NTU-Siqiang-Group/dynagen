@@ -141,6 +141,18 @@ def get_llama_config(name, **kwargs):
             num_key_value_heads=8,
             vocab_size=128256,
         )
+    elif "34b" in arch_name:
+        config = LlamaConfig(
+            name=name,
+            org=org,
+            hf_token=kwargs.get("hf_token"),
+            input_dim=8192,
+            intermediate_size=22016,
+            n_head=64,
+            num_hidden_layers=48,
+            num_key_value_heads=8,
+            vocab_size=32000,
+        )
     else:
         raise ValueError(f"Invalid model name: {name}")
 

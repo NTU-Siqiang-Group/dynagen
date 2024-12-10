@@ -1,8 +1,9 @@
 from math import ceil
+from tqdm import tqdm
 import numpy as np
 import copy
 
-from network_config import ProfilerConfig
+from flexgen.optimize.network_config import ProfilerConfig
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -103,7 +104,7 @@ class DynagenOpt:
             population.append((self.cache_prefetch.copy(), self.weight_prefetch.copy(), self.cpu_delegation.copy(), self.weight_percent.copy(), self.cache_percent.copy()))
 
 
-        for i in range(max_iter):
+        for i in tqdm(range(max_iter)):
             # evaluate the costs
             costs = [0 for _ in range(len(population))]
             mems = [0 for _ in range(len(population))]

@@ -3,10 +3,15 @@ from flexgen.timer import timers
 from tqdm import tqdm
 import numpy as np
 import torch
+import time
 
 
 class ComputationPolicyImpl(ComputationPolicyInterface):
     def generation_loop_normal(self, this, evaluate):
+        sum_attn = 0.0
+        sum_mlp = 0.0
+        count_attn = 0
+        count_mlp = 0
         for i in range(this.execute_gen_len):
             timers("generate").start()
             for k in range(this.num_gpu_batches):
@@ -17,14 +22,28 @@ class ComputationPolicyImpl(ComputationPolicyInterface):
                 for k in range(this.num_gpu_batches):
                     this.load_cache(i, j, k, overlap=False)
                     this.load_hidden(i, j, k)
+                    start_time = time.time()
                     this.compute_layer(i, j, k)
+                    duration = time.time() - start_time
                     if evaluate and j == this.num_layers - 1:
                         this.sync()
                         break
+                    if i > 0:
+                        if j % 2 == 1:
+                            sum_attn += duration
+                            count_attn += 1
+                        else:
+                            sum_mlp += duration
+                    count_mlp += 1
                     this.sync()
                     this.store_hidden(i, j, k)
                     this.store_cache(i, j, k, overlap=False)
             timers("generate").stop()
+        if count_attn > 0:
+            avg_attn = sum_attn / count_attn
+            avg_mlp = sum_mlp / count_mlp
+            print("Average compute_layer time for attn:", avg_attn, "seconds")
+            print("Average compute_layer time for mlp:", avg_mlp, "seconds")
 
     def generation_loop_debug_normal(self, this):
         execute_num_batches = 20
@@ -115,53 +134,25 @@ class ComputationPolicyImpl(ComputationPolicyInterface):
         this.sync()
 
         # Generate
-        if profile_dir:
-            with torch.profiler.profile(
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
-                with_flops=True,
-                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-            ) as prof:
-                for i in tqdm(range(this.execute_gen_len)):
-                    timers("generate").start()
-                    this.update_attention_mask(i, 0)
-                    for j in range(this.num_layers):
-                        this.load_weight(i, j + 1, 0)
-                        this.load_cache(i, j + 1, 0)
-                        this.load_hidden(i, j, 0)
-                        this.compute_layer(i, j, 0)
-                        if evaluate and j == this.num_layers - 1:
-                            this.sync()
-                            break
-                        this.store_cache(i, j - 1, 0)
-                        this.store_hidden(i, j, 0)
-                        this.sync()
-                    timers("generate").stop()
-
-                    if this.task.stop and np.all(this.stopped):
-                        break
-                    prof.step()
-        else:
-            for i in tqdm(range(this.execute_gen_len)):
-                timers("generate").start()
-                this.update_attention_mask(i, 0)
-                for j in range(this.num_layers):
-                    this.load_weight(i, j + 1, 0)
-                    this.load_cache(i, j + 1, 0)
-                    this.load_hidden(i, j, 0)
-                    this.compute_layer(i, j, 0)
-                    if evaluate and j == this.num_layers - 1:
-                        this.sync()
-                        break
-                    this.store_cache(i, j - 1, 0)
-                    this.store_hidden(i, j, 0)
+        for i in tqdm(range(this.execute_gen_len)):
+            timers("generate").start()
+            this.update_attention_mask(i, 0)
+            for j in range(this.num_layers):
+                this.load_weight(i, j + 1, 0)
+                this.load_cache(i, j + 1, 0)
+                this.load_hidden(i, j, 0)
+                this.compute_layer(i, j, 0)
+                if evaluate and j == this.num_layers - 1:
                     this.sync()
-                timers("generate").stop()
-
-                if this.task.stop and np.all(this.stopped):
                     break
+                this.store_cache(i, j - 1, 0)
+                this.store_hidden(i, j, 0)
+
+                this.sync()
+            timers("generate").stop()
+
+            if this.task.stop and np.all(this.stopped):
+                break
 
     def generation_loop_overlap_multi_batch(self, this, profile_dir):
         # Prologue
@@ -169,47 +160,23 @@ class ComputationPolicyImpl(ComputationPolicyInterface):
             this.load_weight(0, 0, k)
         this.load_hidden(0, 0, 0)
         this.sync()
-
         # Generate
-        if profile_dir:
-            with torch.profiler.profile(
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
-                with_flops=True,
-                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-            ) as prof:
-                for i in tqdm(range(this.execute_gen_len)):
-                    timers("generate").start()
-                    for k in range(this.num_gpu_batches):
-                        this.update_attention_mask(i, k)
-                    for j in range(this.num_layers):
-                        for k in range(this.num_gpu_batches):
-                            this.load_weight(i, j + 1, k)
-                            this.load_cache(i, j, k + 1)
-                            this.store_hidden(i, j, k - 1)
-                            this.load_hidden(i, j, k + 1)
-                            this.compute_layer(i, j, k)
-                            this.store_cache(i, j, k - 1)
-                            this.sync()
-                    timers("generate").stop()
-                    prof.step()
-        else:
-            for i in tqdm(range(this.execute_gen_len)):
-                timers("generate").start()
+
+        for i in tqdm(range(this.execute_gen_len)):
+            timers("generate").start()
+            for k in range(this.num_gpu_batches):
+                this.update_attention_mask(i, k)
+            for j in range(this.num_layers):
                 for k in range(this.num_gpu_batches):
-                    this.update_attention_mask(i, k)
-                for j in range(this.num_layers):
-                    for k in range(this.num_gpu_batches):
-                        this.load_weight(i, j + 1, k)
-                        this.load_cache(i, j, k + 1)
-                        this.store_hidden(i, j, k - 1)
-                        this.load_hidden(i, j, k + 1)
-                        this.compute_layer(i, j, k)
-                        this.store_cache(i, j, k - 1)
-                        this.sync()
-                timers("generate").stop()
+                    print(f"i: {i}, j: {j}, k: {k}")
+                    this.load_weight(i, j + 1, k)
+                    this.load_cache(i, j, k + 1)
+                    this.store_hidden(i, j, k - 1)
+                    this.load_hidden(i, j, k + 1)
+                    this.compute_layer(i, j, k)
+                    this.store_cache(i, j, k - 1)
+                    this.sync()
+            timers("generate").stop()
 
         # Epilogue
         this.store_hidden(this.execute_gen_len - 1, this.num_layers - 1, this.num_gpu_batches - 1)

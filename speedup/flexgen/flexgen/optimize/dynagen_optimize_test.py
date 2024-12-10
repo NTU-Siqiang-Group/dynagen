@@ -1,5 +1,5 @@
 from dynagen_optimize import DynagenOpt, DynagenOptDP
-from network_config import Llama1BConfig
+from network_config import Llama1BConfig, Llama13BConfig
 
 def summarize_policy(gen_len, num_layers, num_batches, opt):
     cache, weight, cpu_del = opt.get_policy()
@@ -23,7 +23,8 @@ def summarize_policy(gen_len, num_layers, num_batches, opt):
 if __name__ == "__main__":
     llama_config = Llama1BConfig()
     # opt = DynagenOpt(len(llama_config.get_weights()), 4, 16, 512, 32, llama_config)
-    opt = DynagenOptDP(len(llama_config.get_weights()), 4, 16, 512, 32, 24, llama_config)
+    opt = DynagenOptDP(len(llama_config.get_weights()), 8, 8, 512, 1, 24, llama_config)
     # opt.optimize(20)
     opt.optimize()
-    summarize_policy(32, len(llama_config.get_weights()), 16, opt)
+    # summarize_policy(32, len(llama_config.get_weights()), 16, opt)
+    print(opt.get_policy())
