@@ -5,7 +5,9 @@ import numpy as np
 import torch
 from concurrent.futures import ThreadPoolExecutor
 from flexgen.optimize.dynagen_optimize import DynagenOpt
+from flexgen.optimize.codegen import exec_code_gen
 
+use_code_gen = True
 
 class MultiStreamBase:
     def __init__(self, size):
@@ -112,16 +114,14 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
         def load_layer_cache(i, j, k, load_to_cpu=False):
             this.load_cache_dyn(i, j, k, load_to_cpu=load_to_cpu)
 
-        def compute_layer(i, j, k, weight_handle, cache_handle, layers_weights_sync, layers_cache_sync):
+        def compute_layer(i, j, k, weight_handle, cache_handle, layers_weights_sync, layers_cache_sync, is_cpu_del):
             if weight_handle is not None:
                 wait_stream_finish(weight_handle)
             layers_weights_sync[k][j] = None
             if this.layers[j].need_cache:
                 wait_stream_finish(cache_handle)
             layers_cache_sync[k][j] = None
-            # cpu_del = k % 2 == 0
-            cpu_del = True
-            # cpu_del = False
+            cpu_del = is_cpu_del
             this.store_hidden(i, j, k - 1)
             this.load_hidden(i, j, k + 1)
             this.compute_layer(i, j, k, cpu_delegation=cpu_del)
@@ -134,8 +134,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.task.prompt_len,
             this.execute_gen_len,
         )
-        # optimizer.optimize_alter_v2()
-        optimizer.optimize_default()
+        optimizer.optimize_alter_v2()
         cache_prefetch, weight_prefetch, cpu_delegation = optimizer.get_policy()
 
         layers_weights_sync = [[None for _ in range(this.num_layers)] for _ in range(this.num_gpu_batches)]
@@ -144,6 +143,13 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
         layers_weights_sync[0][0] = w
         this.load_hidden(0, 0, 0)
         this.sync()
+        
+        if use_code_gen:
+            code = exec_code_gen(this.execute_gen_len, this.num_layers, this.num_gpu_batches, optimizer)
+            compile_code = compile(code, "<string>", "exec")
+            exec(compile_code)
+            return
+
         for i in tqdm(range(this.execute_gen_len)):
             timers("generate").start()
 
@@ -174,6 +180,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                         layers_cache_sync[k][j],
                         layers_weights_sync,
                         layers_cache_sync,
+                        cpu_delegation[(i, j, k)],
                     )
 
                     if i == 0:
