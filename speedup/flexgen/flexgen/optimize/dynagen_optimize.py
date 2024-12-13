@@ -1,13 +1,15 @@
+import copy
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from math import ceil
-from typing import List, Tuple
-from tqdm import tqdm
+
 import numpy as np
-import copy
+from tqdm import tqdm
+from BTrees.IIBTree import IIBTree
+from BTrees.IOBTree import IOBTree
 
 from flexgen.optimize.network_config import ProfilerConfig
 
-from concurrent.futures import ThreadPoolExecutor
 
 class CompThreads:
     def __init__(self, num_threads=32):
@@ -719,47 +721,55 @@ class DynagenOptDP:
 
 @dataclass
 class PrefetchPolicy:
-    io_prefetch_sequence: List[Tuple[int, int, int, int, int]]  # compute_step, prefetch_step, size, is_weight, finish
+    io_prefetch_sequence: np.ndarray  # compute_step, prefetch_step, size, is_weight, finish
+    compute_step_btree: IIBTree
+    prefetch_step_btree: IOBTree
     latencies: np.ndarray
     mem_consumption: np.ndarray
 
     def copy_original(self):
-        return PrefetchPolicy(self.io_prefetch_sequence.copy(), self.latencies.copy(), self.mem_consumption.copy())
+        return PrefetchPolicy(self.io_prefetch_sequence.copy(), IIBTree(self.compute_step_btree.items()), IOBTree(self.prefetch_step_btree.items()), self.latencies.copy(), self.mem_consumption.copy())
 
     def copy(self):
         latencies = np.append(self.latencies, 0)
         mem_consumption = np.append(self.mem_consumption, self.mem_consumption[-1])
-        return PrefetchPolicy(self.io_prefetch_sequence.copy(), latencies, mem_consumption)
+        return PrefetchPolicy(self.io_prefetch_sequence.copy(), IIBTree(self.compute_step_btree.items()), IOBTree(self.prefetch_step_btree.items()), latencies, mem_consumption)
 
     def insert_weight_prefetch(self, compute_step, prefetch_step, size, io_cost):
-        last_finish = max(
-            map(lambda x: x[4], filter(lambda x: x[1] <= prefetch_step, self.io_prefetch_sequence))
-        )
+        last_io_prefetch_idx = self.prefetch_step_btree.get(prefetch_step, None)
+        last_finish = 0 if last_io_prefetch_idx is None else self.io_prefetch_sequence[last_io_prefetch_idx]['finish'].max()
         finish = last_finish + io_cost
-        self.io_prefetch_sequence.append((compute_step, prefetch_step, size, True, finish))
+        self.io_prefetch_sequence = np.append(
+            self.io_prefetch_sequence,
+            np.array([(compute_step, prefetch_step, size, True, finish)], dtype=self.io_prefetch_sequence.dtype)
+        )
+        self.compute_step_btree[compute_step] = len(self.io_prefetch_sequence) - 1
+        self.prefetch_step_btree[prefetch_step] = [*self.prefetch_step_btree.get(prefetch_step, ()), len(self.io_prefetch_sequence) - 1]
         self.mem_consumption[prefetch_step:] += size
-        for i, req in enumerate(self.io_prefetch_sequence):
-            if req[1] > prefetch_step:
-                self.io_prefetch_sequence[i] = (*req[:4], req[4] + io_cost)
+
+        for filtered_io_prefetch_idx in self.prefetch_step_btree.values(min=prefetch_step, excludemin=True):
+            self.io_prefetch_sequence['finish'][filtered_io_prefetch_idx] += io_cost
 
     def insert_cache_prefetch(self, compute_step, prefetch_step, size, io_cost):
-        last_finish = max(
-            map(lambda x: x[4], filter(lambda x: x[1] <= prefetch_step, self.io_prefetch_sequence))
-        )
+        last_io_prefetch_idx = self.prefetch_step_btree.get(prefetch_step, None)
+        last_finish = 0 if last_io_prefetch_idx is None else self.io_prefetch_sequence[last_io_prefetch_idx]['finish'].max()
         finish = last_finish + io_cost
-        self.io_prefetch_sequence.append((compute_step, prefetch_step, size, False, finish))
+        self.io_prefetch_sequence = np.append(
+            self.io_prefetch_sequence,
+            np.array([(compute_step, prefetch_step, size, False, finish)], dtype=self.io_prefetch_sequence.dtype)
+        )
+        self.compute_step_btree[compute_step] = len(self.io_prefetch_sequence) - 1
+        self.prefetch_step_btree[prefetch_step] = [*self.prefetch_step_btree.get(prefetch_step, ()), len(self.io_prefetch_sequence) - 1]
         self.mem_consumption[prefetch_step:] += size
-        for i, req in enumerate(self.io_prefetch_sequence):
-            if req[1] > prefetch_step:
-                self.io_prefetch_sequence[i] = (*req[:4], req[4] + io_cost)
+
+        for filtered_io_prefetch_idx in self.prefetch_step_btree.values(min=prefetch_step, excludemin=True):
+            self.io_prefetch_sequence['finish'][filtered_io_prefetch_idx] += io_cost
 
     def update_latencies(self, prefetch_step, compute_cost):
         for i in range(prefetch_step, len(self.latencies)):
-            max_wait_times = map(
-                lambda x: max(0, x[4] - self.latencies[i - 1]),
-                filter(lambda x: x[0] == i, self.io_prefetch_sequence)
-            )
-            self.latencies[i] += self.latencies[i - 1] + sum(max_wait_times) + compute_cost[i]
+            filtered_io_prefetch = self.io_prefetch_sequence[self.compute_step_btree.get(i, [])]
+            wait_time = 0 if filtered_io_prefetch.size == 0 else max(0, filtered_io_prefetch['finish'] - self.latencies[i - 1])
+            self.latencies[i] += self.latencies[i - 1] + wait_time + compute_cost[i]
 
     def get_last_latency(self):
         return self.latencies[-1]
@@ -782,9 +792,11 @@ class DynagenOptBruteforce:
         self.last_policy_mem_consumption = 0
         self.weight_sizes = profiler.get_weights()
         self.policies = np.full((self.n + 1, self.gpu_memory_capacity + 1), None, dtype=object)
-        self.policies[0] = PrefetchPolicy([], np.zeros(0), np.zeros(0, dtype=np.int64))
+        self.policies[0] = PrefetchPolicy([], None, None, np.zeros(0), np.zeros(0, dtype=np.int64))
         self.policies[1, 1:] = PrefetchPolicy(
-            [(1, 0, self.weight_sizes[0], True, 0)],
+            np.array([(1, 0, self.weight_sizes[0], True, 0.)], dtype=[('compute_step', 'i8'), ('prefetch_step', 'i8'), ('size', 'i8'), ('is_weight', '?'), ('finish', 'f8')]),
+            IIBTree({1: 0}),
+            IOBTree({0: (0,)}),
             np.array([self.profiler.get_compute_mlp_gpu()]),
             np.array([self.weight_sizes[0]])
         )
@@ -809,10 +821,14 @@ class DynagenOptBruteforce:
         return i, j, k
 
     def get_weight_prefetch_bounds(self, c):
+        if not self.is_weight_prefetch_valid(c):
+            return range(c, c + 1)
         lower_bound = max(1, c - self.num_gpu_batches * (self.num_layers - 1))
         return range(lower_bound, c)
 
     def get_cache_prefetch_bounds(self, c):
+        if not self.is_cache_prefetch_valid(c):
+            return range(c, c + 1)
         lower_bound = max(1, c - self.num_gpu_batches * self.num_layers + 1)
         return range(lower_bound, c)
 
@@ -841,7 +857,7 @@ class DynagenOptBruteforce:
         return j % 2 == 1 and k > 0 or j > 0 and j % 2 == 0 and k == 0
 
     def optimize(self):
-        for c in range(1, self.n + 1):
+        for c in range(2, self.n + 1):
             for i_weight in self.get_weight_prefetch_bounds(c):
                 for i_cache in self.get_cache_prefetch_bounds(c):
                     for r in range(1, self.gpu_memory_capacity + 1):
@@ -876,10 +892,10 @@ class DynagenOptBruteforce:
         weight_prefetch = {}
         cpu_delegation = {}
         policy = self.policies[self.n][self.last_policy_mem_consumption]
-        for compute_step, prefetch_step, _, is_weight, _ in policy.io_prefetch_sequence:
+        for compute_step, prefetch_step, _, is_weight, _ in policy.io_prefetch_sequence[1:]:
             if is_weight:
-                weight_prefetch.setdefault(self._decode(prefetch_step), []).append(self._decode(compute_step))
+                weight_prefetch.setdefault(self._decode(prefetch_step - 1), []).append(self._decode(compute_step - 1))
             else:
-                cache_prefetch.setdefault(self._decode(prefetch_step), []).append(self._decode(compute_step))
-                cpu_delegation[self._decode(compute_step)] = 1
+                cache_prefetch.setdefault(self._decode(prefetch_step - 1), []).append(self._decode(compute_step - 1))
+                cpu_delegation[self._decode(compute_step - 1)] = 1
         return cache_prefetch, weight_prefetch, cpu_delegation
