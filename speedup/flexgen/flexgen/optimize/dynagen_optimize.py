@@ -789,16 +789,14 @@ class DynagenOptBruteforce:
         self.gpu_memory_capacity = gpu_memory_capacity
         self.profiler = profiler
 
-        self.last_policy_mem_consumption = 0
         self.weight_sizes = profiler.get_weights()
-        self.policies = np.full((self.n + 1, self.gpu_memory_capacity + 1), None, dtype=object)
-        self.policies[0] = PrefetchPolicy([], None, None, np.zeros(0), np.zeros(0, dtype=np.int64))
-        self.policies[1, 1:] = PrefetchPolicy(
+        self.policies = np.full(self.n + 1, None, dtype=object)
+        self.policies[1] = PrefetchPolicy(
             np.array([(1, 0, self.weight_sizes[0], True, 0.)], dtype=[('compute_step', 'i8'), ('prefetch_step', 'i8'), ('size', 'i8'), ('is_weight', '?'), ('finish', 'f8')]),
             IIBTree({1: 0}),
             IOBTree({0: (0,)}),
-            np.array([self.profiler.get_compute_mlp_gpu()]),
-            np.array([self.weight_sizes[0]])
+            np.array([0, self.profiler.get_compute_mlp_gpu()]),
+            np.array([0, self.weight_sizes[0]])
         )
 
         self.compute_costs = np.zeros(self.n + 1)
@@ -858,40 +856,36 @@ class DynagenOptBruteforce:
 
     def optimize(self):
         for c in range(2, self.n + 1):
+            assert self.policies[c - 1] is not None
+            prev_policy = self.policies[c - 1].copy()
             for i_weight in self.get_weight_prefetch_bounds(c):
                 for i_cache in self.get_cache_prefetch_bounds(c):
-                    for r in range(1, self.gpu_memory_capacity + 1):
-                        if self.policies[c - 1][r] is None:
-                            continue
+                    policy = prev_policy.copy_original()
+                    if self.is_weight_prefetch_valid(c):
+                        weight_size = self.get_weight_size(c)
+                        policy.insert_weight_prefetch(c, i_weight, weight_size, self.profiler.get_htod_cost(weight_size))
 
-                        policy = self.policies[c - 1][r].copy()
+                    if self.is_cache_prefetch_valid(c):
+                        cache_size = self.get_cache_size(c)
+                        policy.insert_cache_prefetch(c, i_cache, cache_size, self.profiler.get_htod_cost(cache_size))
 
-                        if self.is_weight_prefetch_valid(c):
-                            weight_size = self.get_weight_size(c)
-                            policy.insert_weight_prefetch(c, i_weight, weight_size, self.profiler.get_htod_cost(weight_size))
+                    policy.update_latencies(min(i_weight, i_cache), self.compute_costs)
+                    if self.is_weight_offload_valid(c):
+                        policy.mem_consumption[-1] -= self.get_weight_size(c - 1)
+                    if self.is_cache_offload_valid(c):
+                        policy.mem_consumption[-1] -= self.get_cache_size(c - 1)
+                    mem_consumption = policy.get_last_mem_consumption()
+                    if mem_consumption > self.gpu_memory_capacity:
+                        continue
 
-                        if self.is_cache_prefetch_valid(c):
-                            cache_size = self.get_cache_size(c)
-                            policy.insert_cache_prefetch(c, i_cache, cache_size, self.profiler.get_htod_cost(cache_size))
-
-                        policy.update_latencies(min(i_weight, i_cache), self.compute_costs)
-                        if self.is_weight_offload_valid(c):
-                            policy.mem_consumption[-1] -= self.get_weight_size(c - 1)
-                        if self.is_cache_offload_valid(c):
-                            policy.mem_consumption[-1] -= self.get_cache_size(c - 1)
-                        mem_consumption = policy.get_last_mem_consumption()
-
-                        if self.policies[c][mem_consumption] is None or policy.get_last_latency() < self.policies[c][mem_consumption].get_last_latency():
-                            self.policies[c][mem_consumption] = policy
-                            if c == self.n:
-                                self.last_policy_mem_consumption = mem_consumption
+                    if self.policies[c] is None or policy.get_last_latency() < self.policies[c].get_last_latency():
+                        self.policies[c] = policy
 
     def get_policy(self):
-        assert self.last_policy_mem_consumption != 0
         cache_prefetch = {}
         weight_prefetch = {}
         cpu_delegation = {}
-        policy = self.policies[self.n][self.last_policy_mem_consumption]
+        policy = self.policies[self.n]
         for compute_step, prefetch_step, _, is_weight, _ in policy.io_prefetch_sequence[1:]:
             if is_weight:
                 weight_prefetch.setdefault(self._decode(prefetch_step - 1), []).append(self._decode(compute_step - 1))
