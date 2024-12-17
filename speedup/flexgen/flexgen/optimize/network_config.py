@@ -43,17 +43,25 @@ class Llama1BConfig(ProfilerConfig):
         mlp_w_u_size = 33554432
         mlp_w_d_size = 33554432
 
-        attention_size = attention_weight_size
+        self.attention_size = attention_weight_size
         output_size = output_w_ln_size + output_w_token_size
         input_size = input_w_token_size
-        mlp_size = mlp_w_ln_size + mlp_w_g_size + mlp_w_u_size + mlp_w_d_size
+        self.mlp_size = mlp_w_ln_size + mlp_w_g_size + mlp_w_u_size + mlp_w_d_size
 
         weights = [input_size]
         for _ in range(16):
-            weights.append(attention_size)
-            weights.append(mlp_size)
+            weights.append(self.attention_size)
+            weights.append(self.mlp_size)
         weights.append(output_size)
         return weights
+    
+    def get_mlp_size(self):
+        self.get_weights()
+        return self.mlp_size
+    
+    def get_attn_size(self):
+        self.get_weights()
+        return self.attention_size
 
     def get_cache_size(self, batch_size, seq_len):
         # input_dim: 2048
@@ -85,25 +93,33 @@ class Llama13BConfig(ProfilerConfig):
         # W_d: [intermediate_size, hidden_size]
         # 每个为70,656,000参数，*2字节=141,312,000 bytes
         # MLP共有3个大矩阵 W_g/W_u/W_d，共211,968,000参数 (3*70,656,000)，=423,936,000 bytes
-        mlp_size = 423_936_000 + mlp_w_ln_size
+        self.mlp_size = 423_936_000 + mlp_w_ln_size
 
         # Attention权重
         # Q, K, V, O: 每个[hidden_size, hidden_size] = 26,214,400参数
         # *2 bytes=52,428,800 bytes each
         # 四个合计209,715,200 bytes，加LN=+10,240
-        attention_size = 209_715_200 + output_w_ln_size
+        self.attention_size = 209_715_200 + output_w_ln_size
 
         # Output层权重
         output_size = output_w_ln_size + output_w_token_size
 
         weights = [input_w_token_size]
         for _ in range(num_hidden_layers):
-            weights.append(attention_size)
-            weights.append(mlp_size)
+            weights.append(self.attention_size)
+            weights.append(self.mlp_size)
         weights.append(output_size)
 
         return weights
-
+    
+    def get_mlp_size(self):
+        self.get_weights()
+        return self.mlp_size
+    
+    def get_attn_size(self):
+        self.get_weights()
+        return self.attention_size
+    
     def get_cache_size(self, batch_size, seq_len):
         # 仿照之前的逻辑，KV缓存
         return 2 * batch_size * seq_len * 5120 * 2
