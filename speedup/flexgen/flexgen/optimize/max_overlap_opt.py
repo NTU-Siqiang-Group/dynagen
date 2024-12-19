@@ -14,16 +14,16 @@ def cost_prefetch_weight(start, w1):
     for i in range(start, int(w1)):
         if i % Batch == 0:
             if i // Batch % 2 == 0:
-                cost += config.get_htod_cost(config.get_mlp_size())
+                cost += config.get_htod_cost(config.get_mlp_size()) * 0.8
             else:
-                cost += config.get_htod_cost(config.get_attn_size())
+                cost += config.get_htod_cost(config.get_attn_size()) * 0.8
     return cost
 
 
-def cost_prefetch_cache(start, c1):
+def cost_prefetch_cache(start, c):
     cost = 0
-    for i in range(start, int(c1)):
-        cost += config.get_htod_cost(config.get_cache_size(Batch, 128))
+    for i in range(start, int(c)):
+        cost += config.get_htod_cost(config.get_cache_size(Batch, 2048))
     return cost
 
 
@@ -32,12 +32,13 @@ def cpu_del(x):
 
 
 def gpu_compute(start, x):
+    print(start, int(x))
     cost = 0
     for i in range(start, int(x)):
         if i % 2 == 0:
-            cost += 1e-4
+            cost += 1e-4 * 2
         else:
-            cost += 5e-3
+            cost += 5e-3 * 2
     return cost
 
 
@@ -46,20 +47,24 @@ def objective(w, c):
     cost = 0
     w_prev = 0
     c_prev = 0
+    diff = 0
     while w_prev < s or c_prev < s:
         T_prefetch = (
             cost_prefetch_weight(w_prev, w_prev + w)
             + cost_prefetch_cache(c_prev, c_prev + c)
             + cpu_del(min(w_prev + w, c_prev + c))
         )
+        print(w,c )
         T_compute = gpu_compute(min(w_prev, c_prev), min(w_prev + w, c_prev + c) - 1)
         cost += max(T_prefetch, T_compute)
         if w_prev < s:
             w_prev += w
         if c_prev < s:
             c_prev += c
-    print("w:", w, "c:", c, "T_prefetch:", T_prefetch, "T_compute:", T_compute)
-    return abs(T_prefetch - T_compute)
+        # diff += abs(T_prefetch - T_compute)
+        print("T_prefetch:", T_prefetch, "T_compute:", T_compute)
+    print("w:", w, "c:", c)
+    return cost
 
 
 w_range = range(1, 16)
@@ -78,4 +83,4 @@ for w in tqdm(w_range):
 
 print("Optimal w:", best_w)
 print("Optimal c:", best_c)
-print("Minimized difference:", best_diff)
+print("Minimized cost:", best_diff)
