@@ -25,7 +25,7 @@ if __name__ == "__main__":
     # opt = DynagenOpt(len(llama_config.get_weights()), 4, 16, 512, 32, llama_config)
     # opt = DynagenOptDP(len(llama_config.get_weights()), 8, 8, 512, 1, 24, llama_config)
     # opt = DynagenOptBruteforce(len(llama_config.get_weights()), 8, 8, 512, 1, 24, llama_config)
-    opt = DynagenOptWorksetHeuristic(len(llama_config.get_weights()), 8, 8, 512, 32, 24, llama_config)
+    opt = DynagenOptWorksetHeuristic(len(llama_config.get_weights()), 8, 8, 2048, 128, 24, llama_config)
     # opt.optimize(20)
     opt.optimize()
     # summarize_policy(32, len(llama_config.get_weights()), 16, opt)

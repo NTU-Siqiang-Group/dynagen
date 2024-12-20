@@ -930,7 +930,7 @@ class DynagenOptWorksetHeuristic:
     def prefetch_range(self, c):
         if self.max_num_prefetch_batches == 0:
             return range(c, self.n + 1)
-        return range(c, min(c + self.max_num_prefetch_batches, self.n + 1))
+        return range(c, min(c + self.max_num_prefetch_batches + 1, self.n + 1))
 
     def get_weight_size(self, c):
         j = ((c - 1) % (self.num_layers * self.num_gpu_batches)) // self.num_gpu_batches
