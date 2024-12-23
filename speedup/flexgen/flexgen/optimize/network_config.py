@@ -54,11 +54,11 @@ class Llama1BConfig(ProfilerConfig):
             weights.append(self.mlp_size)
         weights.append(output_size)
         return weights
-    
+
     def get_mlp_size(self):
         self.get_weights()
         return self.mlp_size
-    
+
     def get_attn_size(self):
         self.get_weights()
         return self.attention_size
@@ -111,18 +111,38 @@ class Llama13BConfig(ProfilerConfig):
         weights.append(output_size)
 
         return weights
-    
+
     def get_mlp_size(self):
         self.get_weights()
         return self.mlp_size
-    
+
     def get_attn_size(self):
         self.get_weights()
         return self.attention_size
-    
+
     def get_cache_size(self, batch_size, seq_len):
         # 仿照之前的逻辑，KV缓存
         return 2 * batch_size * seq_len * 5120 * 2
 
     def get_hidden_size(self, batch_size, seq_len):
         return batch_size * seq_len * 5120 * 2
+
+    def get_gpu_home_prefill(self, weight_percent, batch_size, seq_len):
+        gpu_home_prefill = weight_percent * sum(self.get_weights()) + 2 * self.get_hidden_size(batch_size, seq_len)
+        return gpu_home_prefill
+
+    def get_gpu_work_prefill(self, weight_percent, batch_size, seq_len):
+        h1 = 5120
+        h2 = 13824
+        qkv = batch_size * 8 * seq_len * h1
+        embed = batch_size * 4 * seq_len * h1
+        mlp = batch_size * 2 * seq_len * (h1 + h2)
+        gpu_work_prefill = 2 * (1 - weight_percent) * (8 * h1 * h1 + 4 * h1 * h2) + max(qkv, embed, mlp)
+        return gpu_work_prefill
+
+
+config = Llama13BConfig()
+
+Batch_size = 16
+Seq_len = 1024
+print(config.get_gpu_home_prefill(0.8, Batch_size, Seq_len) + config.get_gpu_work_prefill(0.8, Batch_size, Seq_len))
