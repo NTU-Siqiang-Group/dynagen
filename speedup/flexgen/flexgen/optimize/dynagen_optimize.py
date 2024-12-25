@@ -406,13 +406,13 @@ class DynagenOpt:
                             token = i + 1
                         if token >= self.gen_len:
                             continue
-                        if layers_weights_sync[batch][layer] is None and loading_weights < self.num_gpu_batches * 5:
+                        if layers_weights_sync[batch][layer] is None and loading_weights <= self.num_gpu_batches * 15:
                             self.weight_prefetch[self._idx(token, layer, batch)] = self._idx(i, j, k)
                             layers_weights_sync[batch][layer] = 1
                             loading_weights += 1
-                        if layers_cache_sync[batch][layer] is None and loading_caches < 15:
+                        if layers_cache_sync[batch][layer] is None and loading_caches <= 15:
                             self.cache_prefetch[self._idx(token, layer, batch)] = self._idx(i, j, k)
-                            self.cpu_delegation[self._idx(token, layer, batch)] = batch % 2 == 0
+                            self.cpu_delegation[self._idx(token, layer, batch)] = False
                             layers_cache_sync[batch][layer] = 1
                             loading_caches += 1
                     # compute
@@ -424,7 +424,7 @@ class DynagenOpt:
 # 1. 只有奇数层，且不是最后一层需要cache
 # 2. 推论：[i, j, k]需要的cache只可以在 >= [i-1, j, k+1] 且 < [i, j, k]的step被prefetch
 # 3. 第 [i, j, k] "step" **可以且只可以** prefetch之后任意 **一整层** 的weight，假设在[0, 0, 0]prefetch了第1层的weight，那weight_prefetch[0, 1, 0] = 0。特别地，[0, 0, k]的weight通常已被预加载，无需考虑。
-# 4. 推论：[i, j, 0]需要的weight只可以在 >= [i-1, j+1, 0] 且 < [i, j, 0]的step被prefetch
+# 4. 推论：[i, j, 0]需要的weight只可以在 >= [i-1, j, -1] 且 < [i, j, 0]的step被prefetch
 # 5. weight必须被prefetch到GPU；但cache可以不被prefetch到GPU，此时需要使用cpu_delegation
 # 6. cache在下一个batch被offload，weight在下一个layer的第0个batch被offload
 # 7. 推论：第[0, 0, k] "step" 的latency只取决于：compute<-是否cpu_delegation
@@ -902,7 +902,7 @@ class DynagenOptWorksetHeuristic:
         self.prompt_len = prompt_len
         self.gen_len = gen_len
         self.gpu_memory_capacity = gpu_memory_capacity
-        self.max_num_prefetch_batches = max_num_prefetch_batches
+        self.max_num_prefetch_batches = max(0, min(num_layers * num_gpu_batches - 1, max_num_prefetch_batches))  # clamp(max_num_prefetch_batches, 0, num_layers * num_gpu_batches - 1)
         self.profiler = profiler
 
         self.weight_sizes = profiler.get_weights()
@@ -929,7 +929,7 @@ class DynagenOptWorksetHeuristic:
 
     def prefetch_range(self, c):
         if self.max_num_prefetch_batches == 0:
-            return range(c, self.n + 1)
+            return range(c, min(c + self.num_layers * self.num_gpu_batches, self.n + 1))
         return range(c, min(c + self.max_num_prefetch_batches + 1, self.n + 1))
 
     def get_weight_size(self, c):
@@ -943,12 +943,6 @@ class DynagenOptWorksetHeuristic:
     def get_remaining_size(self, mem_consumption):
         return int(np.floor(((self.gpu_memory_capacity << 30) - mem_consumption) / (1 << 30)))
 
-    def get_first_step_remaining(self, btree, r):
-        r = int(np.ceil(r / (1 << 30)))
-        iterator = btree.iterkeys(min=r)
-        key = next(iterator)
-        return btree[key]
-
     def is_weight_offload_valid(self, c):
         k = (c - 1) % self.num_gpu_batches
         return k == 0 and c != 1
@@ -960,6 +954,28 @@ class DynagenOptWorksetHeuristic:
         return j % 2 == 1 and k > 0 or j > 0 and j % 2 == 0 and k == 0
 
     def optimize(self):
+        def get_first_step_remaining(r, c, is_weight):
+            r = int(np.ceil(r / (1 << 30)))
+            iterator = remaining_sizes.iterkeys(min=r, max=self.gpu_memory_capacity, excludemax=True)
+            while True:
+                key = next(iterator)
+                p, _ = remaining_sizes[key]
+                if is_weight and c - p < self.num_layers * self.num_gpu_batches - 1:
+                    return p
+                if not is_weight and c - p < self.num_layers * self.num_gpu_batches:
+                    return p
+
+        def reset_weight_prefetched(start, stop):
+            weight_prefetched[start:stop] = False
+            stop -= 1
+            k = (stop - 1) % self.num_gpu_batches
+            weight_prefetched[stop:stop + self.num_gpu_batches - k] = False
+
+        def reset_cache_prefetched(start, stop):
+            for c in range(start, stop):
+                if self.need_cache(c):
+                    cache_prefetched[c] = False
+
         mem_consumption = self.weight_sizes[0]
         remaining_sizes = IOBTree()
         weight_prefetched = np.zeros(self.n + 1, bool)
@@ -988,11 +1004,25 @@ class DynagenOptWorksetHeuristic:
                     cache_prefetched[p] = True
             remaining_sizes.clear()
             for c in prefetch_range:
+                if i != c:
+                    if self.is_weight_offload_valid(c):
+                        mem_consumption -= self.get_weight_size(c - 1)
+                        r = self.get_remaining_size(mem_consumption)
+                        if r not in remaining_sizes:
+                            remaining_sizes[r] = (c, mem_consumption)
+                    if self.is_cache_offload_valid(c) and self.cpu_del[c - 1] == 0:
+                        mem_consumption -= self.get_cache_size(c - 1)
+                        r = self.get_remaining_size(mem_consumption)
+                        if r not in remaining_sizes:
+                            remaining_sizes[r] = (c, mem_consumption)
                 weight_size = self.get_weight_size(p)
                 cache_size = self.get_cache_size(p)
                 if not weight_prefetched[c]:
                     assert i != c, 'weight for the current computing step should not be prefetched in the same step'
-                    i, mem_consumption = self.get_first_step_remaining(remaining_sizes, weight_size)
+                    i = get_first_step_remaining(weight_size, c, True)
+                    reset_weight_prefetched(i + 1, c)
+                    reset_cache_prefetched(i + 1, c)
+                    mem_consumption = self.get_weight_size(i) + self.get_cache_size(i) if self.need_cache(i) else 0
                     break
                 if i != c:
                     self.weight_prefetch[c] = i
@@ -1001,40 +1031,33 @@ class DynagenOptWorksetHeuristic:
                         self.cpu_del[c] = 1
                         cache_prefetched[c] = True
                     else:
-                        i, mem_consumption = self.get_first_step_remaining(remaining_sizes, cache_size)
+                        i = get_first_step_remaining(cache_size, c, False)
+                        reset_weight_prefetched(i + 1, c + 1)
+                        reset_cache_prefetched(i + 1, c)
+                        mem_consumption = self.get_weight_size(i) + self.get_cache_size(i) if self.need_cache(i) else 0
                     break
-                if i == c:
-                    continue
-                if self.cpu_del[c] == 0:
+                if i != c and self.cpu_del[c] == 0:
                     self.cache_prefetch[c] = i
-                if self.is_weight_offload_valid(c):
-                    mem_consumption -= self.get_weight_size(c - 1)
-                    r = self.get_remaining_size(mem_consumption)
-                    if r not in remaining_sizes:
-                        remaining_sizes[r] = (c, mem_consumption)
-                if self.is_cache_offload_valid(c) and self.cpu_del[c - 1] == 0:
-                    mem_consumption -= self.get_cache_size(c - 1)
-                    r = self.get_remaining_size(mem_consumption)
-                    if r not in remaining_sizes:
-                        remaining_sizes[r] = (c, mem_consumption)
             if c == prefetch_range.stop - 1:
                 i = c
+                mem_consumption = self.get_weight_size(i) + self.get_cache_size(i) if self.need_cache(i) else 0
             progress.update(i - prev)
             prev = i
         progress.update(1)
 
     def get_policy(self):
         cache_prefetch = {}
-        weight_prefetch = {}
+        weight_prefetch = {(0, 0, 0): [(0, 0, k) for k in range(1, self.num_gpu_batches)]}
         cpu_delegation = {}
         i, j, k = 0, 0, 0
         for c in range(1, self.n + 1):
             if self.cache_prefetch[c] != 0 and self.need_cache(c):
                 cache_prefetch.setdefault(self._decode(self.cache_prefetch[c] - 1), []).append((i, j, k))
             if self.weight_prefetch[c] != 0 and self.need_weight(c):
-                weight_prefetch.setdefault(self._decode(self.weight_prefetch[c] - 1), []).append((i, j, k))
-            if self.cpu_del[c] == 1:
-                cpu_delegation[(i, j, k)] = 1
+                assert k == 0
+                for batch in range(self.num_gpu_batches):
+                    weight_prefetch.setdefault(self._decode(self.weight_prefetch[c] - 1), []).append((i, j, batch))
+            cpu_delegation[(i, j, k)] = self.cpu_del[c]
             k += 1
             if k == self.num_gpu_batches:
                 k = 0

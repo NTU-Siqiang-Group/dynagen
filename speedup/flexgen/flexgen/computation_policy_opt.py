@@ -1,10 +1,11 @@
 from flexgen.computation_policy_interface import *
+from flexgen.optimize.network_config import Llama13BConfig
 from flexgen.timer import timers
 from tqdm import tqdm
 import numpy as np
 import torch
 from concurrent.futures import ThreadPoolExecutor
-from flexgen.optimize.dynagen_optimize import DynagenOpt
+from flexgen.optimize.dynagen_optimize import DynagenOpt, DynagenOptWorksetHeuristic
 
 
 class MultiStreamBase:
@@ -124,7 +125,9 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.compute_layer(i, j, k, cpu_delegation=cpu_del)
             this.store_cache(i, j, k - 1)
 
-        optimizer = DynagenOpt(this.num_layers, 4, this.num_gpu_batches, 512, this.execute_gen_len)
+        # optimizer = DynagenOptWorksetHeuristic(this.num_layers, this.policy.gpu_batch_size, this.num_gpu_batches, 1024, this.execute_gen_len, 23, Llama13BConfig())
+        # optimizer.optimize()
+        optimizer = DynagenOpt(this.num_layers, this.policy.gpu_batch_size, this.num_gpu_batches, 1024, this.execute_gen_len, Llama13BConfig())
         optimizer.optimize_alter_v2()
         cache_prefetch, weight_prefetch, cpu_delegation = optimizer.get_policy()
 
