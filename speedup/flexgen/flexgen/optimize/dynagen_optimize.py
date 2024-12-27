@@ -14,9 +14,10 @@ from flexgen.optimize.network_config import ProfilerConfig
 class CompThreads:
     def __init__(self, num_threads=32):
         self.pool = ThreadPoolExecutor(max_workers=num_threads)
-    
+
     def run(self, func, *args):
         return self.pool.submit(func, *args)
+
 
 class DynagenOpt:
     def __init__(self, num_layers, batch_size, num_gpu_batches, prompt_len, gen_len, profiler=ProfilerConfig()):
@@ -26,22 +27,28 @@ class DynagenOpt:
         self.prompt_len = prompt_len
         self.gen_len = gen_len
 
-        self.profiler = profiler # for one layer, placeholder
+        self.profiler = profiler  # for one layer, placeholder
         self.weights_size = self.profiler.get_weights()
 
         # Assumption 2: the batch can fully saturate the GPU memory.
         # 1. Prefetch & offload policy
         #   - KV cache
         #   - Weight
-        self.mem_consumption = np.array([None] * gen_len * num_layers * num_gpu_batches) # token * num_batches
-        self.cache_prefetch = np.array([None] * gen_len * num_layers * num_gpu_batches) # at which "step" the cache is fetched
+        self.mem_consumption = np.array([None] * gen_len * num_layers * num_gpu_batches)  # token * num_batches
+        self.cache_prefetch = np.array(
+            [None] * gen_len * num_layers * num_gpu_batches
+        )  # at which "step" the cache is fetched
         # only (i, j, 0) is valid for weight prefetch
-        self.weight_prefetch = np.array([None] * gen_len * num_layers * num_gpu_batches) # at which "step" the weight is fetched
+        self.weight_prefetch = np.array(
+            [None] * gen_len * num_layers * num_gpu_batches
+        )  # at which "step" the weight is fetched
         # 2. TODO: KV cache percentage and weight percentage (initial value, they are fetched into the buffer gradually
         #   according to the prefetch policy). Currently assume both of them are stored in CPU memory.
         # 3. CPU delegation
         # only (i, j, 0) is valid for cpu delegation
-        self.cpu_delegation = np.array([0] * gen_len * num_layers * num_gpu_batches) # which batch should be submitted to 
+        self.cpu_delegation = np.array(
+            [0] * gen_len * num_layers * num_gpu_batches
+        )  # which batch should be submitted to
         # TODO: considering compute two batch at a time. One in GPU and one in CPU
 
         self.weight_percent = np.zeros(num_layers)
@@ -52,21 +59,21 @@ class DynagenOpt:
         self.gen_child_rate = 0.8
         self.gen_mutate_rate = 0.1
         self.population_size = 100
-        
+
         self.comp_threads = CompThreads()
-    
+
     def get_htod_cost(self, size):
         return self.profiler.get_htod_cost(size)
-    
+
     def get_dtoh_cost(self, size):
         return self.profiler.get_dtoh_cost(size)
-    
+
     def get_compute_cache_gpu(self):
         return self.profiler.get_compute_cache_gpu()
-    
+
     def get_compute_cache_cpu(self):
         return self.profiler.get_compute_cache_cpu()
-    
+
     def get_compute_mlp_gpu(self):
         return self.profiler.get_compute_mlp_gpu()
 
@@ -79,21 +86,21 @@ class DynagenOpt:
                 for k in range(self.num_gpu_batches):
                     cache_prefetch_idx = self.cache_prefetch[self._idx(i, j, k)]
                     weight_prefetch_idx = self.weight_prefetch[self._idx(i, j, k)]
-                    
+
                     if cache_prefetch_idx is not None:
                         if self._decode(cache_prefetch_idx) not in cache_prefetch:
                             cache_prefetch[self._decode(cache_prefetch_idx)] = []
                         cache_prefetch[self._decode(cache_prefetch_idx)].append((i, j, k))
-                            
+
                     if weight_prefetch_idx is not None:
                         if self._decode(weight_prefetch_idx) not in weight_prefetch:
                             weight_prefetch[self._decode(weight_prefetch_idx)] = []
                         weight_prefetch[self._decode(weight_prefetch_idx)].append((i, j, k))
-                    
+
                     cpu_delegation[(i, j, k)] = self.cpu_delegation[self._idx(i, j, 0)]
-        
+
         return cache_prefetch, weight_prefetch, cpu_delegation
-    
+
     # TODO: considering the KV cache is stored in GPU
     # TODO: considering cpu delegation for batch
     def optimize(self, max_iter=10):
@@ -105,8 +112,15 @@ class DynagenOpt:
             self.init_cpu_delegation()
             self.init_weight_percent()
             self.init_cache_percent()
-            population.append((self.cache_prefetch.copy(), self.weight_prefetch.copy(), self.cpu_delegation.copy(), self.weight_percent.copy(), self.cache_percent.copy()))
-
+            population.append(
+                (
+                    self.cache_prefetch.copy(),
+                    self.weight_prefetch.copy(),
+                    self.cpu_delegation.copy(),
+                    self.weight_percent.copy(),
+                    self.cache_percent.copy(),
+                )
+            )
 
         for i in tqdm(range(max_iter)):
             # evaluate the costs
@@ -114,31 +128,37 @@ class DynagenOpt:
             mems = [0 for _ in range(len(population))]
             futures = []
             for j in range(len(population)):
+
                 def get_cost(k):
                     costs[k] = self.get_cost_from_policy(*population[k])
                     # mems[k] = self.get_mem_consumption(*population[k])
+
                 f = self.comp_threads.run(get_cost, j)
                 futures.append(f)
             # wait for all the threads
             for f in futures:
                 f.result()
-            
+
             # maintain the best
             best_idx = self.best(population, costs)
-            print(f'iter {i}, best cost: {costs[best_idx]}, peak mem: {self.get_mem_consumption(*population[best_idx]) / (1 << 20)} MB')
+            print(
+                f"iter {i}, best cost: {costs[best_idx]}, peak mem: {self.get_mem_consumption(*population[best_idx]) / (1 << 20)} MB"
+            )
             best_policy = copy.deepcopy(population[best_idx])
             # select
             population = self.select(population, costs, self.population_size)
             # crossover
             pop_num = len(population)
-            pop1 = population[:pop_num // 2]
-            pop2 = population[pop_num // 2:]
+            pop1 = population[: pop_num // 2]
+            pop2 = population[pop_num // 2 :]
             new_pops = []
             futures = []
             for p1, p2 in zip(pop1, pop2):
                 if np.random.rand() <= self.gen_child_rate:
+
                     def crossover_compute():
                         return self.crossover(p1, p2)
+
                     # new_pops.extend(self.cossover(p1, p2))
                     f = self.comp_threads.run(crossover_compute)
                     futures.append(f)
@@ -154,9 +174,11 @@ class DynagenOpt:
             # replace a random one
             random_pos = np.random.randint(0, len(population))
             population[random_pos] = best_policy
-        
+
         best_policy = population[self.best(population, costs)]
-        self.cache_prefetch, self.weight_prefetch, self.cpu_delegation, self.weight_percent, self.cache_percent = best_policy
+        self.cache_prefetch, self.weight_prefetch, self.cpu_delegation, self.weight_percent, self.cache_percent = (
+            best_policy
+        )
 
     def get_random_cache_prefetch_idx(self, i, j, k):
         left_bound = (i - 1, j, k)
@@ -174,15 +196,15 @@ class DynagenOpt:
                     continue
                 for k in range(self.num_gpu_batches):
                     self.cache_prefetch[self._idx(i, j, k)] = self.get_random_cache_prefetch_idx(i, j, k)
-    
+
     def init_weight_percent(self):
         for j in range(self.num_layers):
-            self.weight_percent[j] = np.random.rand() # 0 ~ 1
-    
+            self.weight_percent[j] = np.random.rand()  # 0 ~ 1
+
     def init_cache_percent(self):
         for j in range(self.num_layers):
             self.cache_percent[j] = np.random.rand()
-    
+
     def get_random_weight_prefetch_idx(self, i, j):
         # the weight should be loaded for the first batch of each layer
         # the weight does not depend on the token
@@ -199,13 +221,13 @@ class DynagenOpt:
         for i in range(self.gen_len):
             for j in range(self.num_layers):
                 self.weight_prefetch[self._idx(i, j, 0)] = self.get_random_weight_prefetch_idx(i, j)
-    
+
     # TODO: considering cpu delegation for batch rather than layers?
     def get_random_cpu_delegation(self, j):
         if not self.need_cache(j):
             return 0
         return np.random.randint(0, 2)
-    
+
     def init_cpu_delegation(self):
         for i in range(self.gen_len):
             for j in range(self.num_layers):
@@ -213,13 +235,15 @@ class DynagenOpt:
                     continue
                 use_del = self.get_random_cpu_delegation(j)
                 self.cpu_delegation[self._idx(i, j, 0)] = use_del
-    
+
     def get_mem_consumption_full(self, cache_prefetch, weight_prefetch, cpu_delegation, weight_percent, cache_percent):
         mem_consumption = np.zeros(self.gen_len * self.num_layers * self.num_gpu_batches)
         for j in range(self.num_layers):
             mem_consumption += self.weights_size[j] * weight_percent[j]
             if self.need_cache(j):
-                mem_consumption += self.profiler.get_cache_size(self.batch_size, self.prompt_len + self.gen_len) * cache_percent[j]
+                mem_consumption += (
+                    self.profiler.get_cache_size(self.batch_size, self.prompt_len + self.gen_len) * cache_percent[j]
+                )
         for i in range(self.gen_len):
             for j in range(self.num_layers):
                 cpu_del = cpu_delegation[self._idx(i, j, 0)]
@@ -228,16 +252,24 @@ class DynagenOpt:
                     if cache_prefetch[cur_idx] is not None and cpu_del:
                         prefetch_idx = cache_prefetch[cur_idx]
                         cache_offload_idx = min(self._idx(i, j, k + 1), len(mem_consumption) - 1)
-                        mem_consumption[prefetch_idx:cache_offload_idx] += self.profiler.get_cache_size(self.batch_size, self.prompt_len + i) * (1 - cache_percent[j])
+                        mem_consumption[prefetch_idx:cache_offload_idx] += self.profiler.get_cache_size(
+                            self.batch_size, self.prompt_len + i
+                        ) * (1 - cache_percent[j])
                     if weight_prefetch[cur_idx] is not None:
                         weight_prefetch_idx = weight_prefetch[cur_idx]
                         weight_offload_idx = min(self._idx(i, j + 1, 0), len(mem_consumption) - 1)
-                        mem_consumption[weight_prefetch_idx:weight_offload_idx] += self.weights_size[j] * (1 - weight_percent[j])
+                        mem_consumption[weight_prefetch_idx:weight_offload_idx] += self.weights_size[j] * (
+                            1 - weight_percent[j]
+                        )
         return mem_consumption
-        
+
     def get_mem_consumption(self, cache_prefetch, weight_prefetch, cpu_delegation, weight_percent, cache_percent):
-        return np.max(self.get_mem_consumption_full(cache_prefetch, weight_prefetch, cpu_delegation, weight_percent, cache_percent))
-    
+        return np.max(
+            self.get_mem_consumption_full(
+                cache_prefetch, weight_prefetch, cpu_delegation, weight_percent, cache_percent
+            )
+        )
+
     def get_io_cost_from_policy(self, cache_prefetch, weight_prefetch, cpu_delegation, weight_percent, cache_percent):
         io_costs = np.zeros(self.gen_len * self.num_layers * self.num_gpu_batches)
         for i in range(self.gen_len):
@@ -250,7 +282,9 @@ class DynagenOpt:
                         # wait for the weight loaded
                         weight_prefetch_idx = weight_prefetch[self._idx(i, j, 0)]
                         if io_costs[weight_prefetch_idx] == 0:
-                            io_costs[weight_prefetch_idx] = 0 if weight_prefetch_idx == 0 else io_costs[weight_prefetch_idx - 1]
+                            io_costs[weight_prefetch_idx] = (
+                                0 if weight_prefetch_idx == 0 else io_costs[weight_prefetch_idx - 1]
+                            )
                         _, prefetch_j, _ = self._decode(weight_prefetch_idx)
                         if prefetch_j != j:
                             io_time = self.get_htod_cost(self.weights_size[j] * (1 - weight_percent[j]))
@@ -270,17 +304,25 @@ class DynagenOpt:
                         # 2. the new k v is not required to transfer to CPU. But the whole KV cache should be transfered to CPU after computation
                         cache_prefetch_idx = cache_prefetch[cur_idx]
                         if io_costs[cache_prefetch_idx] == 0:
-                            io_costs[cache_prefetch_idx] = 0 if cache_prefetch_idx == 0 else io_costs[cache_prefetch_idx - 1]
-                        io_time = self.get_htod_cost(self.profiler.get_cache_size(self.batch_size, self.prompt_len + i) * (1 - cache_percent[j]))
+                            io_costs[cache_prefetch_idx] = (
+                                0 if cache_prefetch_idx == 0 else io_costs[cache_prefetch_idx - 1]
+                            )
+                        io_time = self.get_htod_cost(
+                            self.profiler.get_cache_size(self.batch_size, self.prompt_len + i) * (1 - cache_percent[j])
+                        )
                         # prefetch cache
                         io_costs[cache_prefetch_idx] += io_time
                         # store cache, offload to cpu
-                        io_costs[cur_idx] += self.get_dtoh_cost(self.profiler.get_cache_size(self.batch_size, self.prompt_len + i) * (1 - cache_percent[j]))
+                        io_costs[cur_idx] += self.get_dtoh_cost(
+                            self.profiler.get_cache_size(self.batch_size, self.prompt_len + i) * (1 - cache_percent[j])
+                        )
         return io_costs
-    
+
     def get_cost_from_policy(self, cache_prefetch, weight_prefetch, cpu_delegation, weight_percent, cache_percent):
         costs = np.zeros(self.gen_len * self.num_layers * self.num_gpu_batches)
-        io_costs = self.get_io_cost_from_policy(cache_prefetch, weight_prefetch, cpu_delegation, weight_percent, cache_percent)
+        io_costs = self.get_io_cost_from_policy(
+            cache_prefetch, weight_prefetch, cpu_delegation, weight_percent, cache_percent
+        )
         for i in range(self.gen_len):
             for j in range(self.num_layers):
                 need_cache = self.need_cache(j)
@@ -293,7 +335,7 @@ class DynagenOpt:
                         compute_time_finished = costs[cur_idx - 1]
                         # io time larger than compute time
                         wait_time = max(0, io_time_finished - compute_time_finished)
-                    
+
                     compute_time = wait_time
 
                     if not need_cache:
@@ -309,13 +351,13 @@ class DynagenOpt:
                             compute_time += wait_time + self.get_compute_cache_gpu()
                         else:
                             compute_time += self.get_compute_cache_cpu()
-                    
+
                     if costs[cur_idx] == 0 and cur_idx != 0:
                         costs[cur_idx] = costs[cur_idx - 1]
                     costs[cur_idx] += compute_time
-        
+
         return np.sum(costs)
-    
+
     def crossover(self, p1, p2):
         pos = np.random.rand(self.cache_prefetch.shape[0]) <= self.cross_rate
         p1_cache_prefetch = p1[0].copy()
@@ -328,7 +370,7 @@ class DynagenOpt:
         p1_cache_prefetch[pos], p2_cache_prefetch[pos] = p2_cache_prefetch[pos], p1_cache_prefetch[pos]
         p1_weight_prefetch[pos], p2_weight_prefetch[pos] = p2_weight_prefetch[pos], p1_weight_prefetch[pos]
         p1_cpu_delegation[pos], p2_cpu_delegation[pos] = p2_cpu_delegation[pos], p1_cpu_delegation[pos]
-        
+
         pos = np.random.rand(self.weight_percent.shape[0]) <= self.cross_rate
         p1_weight_percent = p1[3].copy()
         p2_weight_percent = p2[3].copy()
@@ -337,9 +379,14 @@ class DynagenOpt:
         p1_weight_percent[pos], p2_weight_percent[pos] = p2_weight_percent[pos], p1_weight_percent[pos]
         p1_cache_percent[pos], p2_cache_percent[pos] = p2_cache_percent[pos], p1_cache_percent[pos]
 
-        return (p1_cache_prefetch, p1_weight_prefetch, p1_cpu_delegation, p1_weight_percent, p1_cache_percent), (p2_cache_prefetch, p2_weight_prefetch, p2_cpu_delegation, p2_weight_percent, p2_cache_percent)
+        return (p1_cache_prefetch, p1_weight_prefetch, p1_cpu_delegation, p1_weight_percent, p1_cache_percent), (
+            p2_cache_prefetch,
+            p2_weight_prefetch,
+            p2_cpu_delegation,
+            p2_weight_percent,
+            p2_cache_percent,
+        )
 
-    
     def select(self, population, costs, population_size):
         # normalize costs
         prob = (np.max(costs) - costs + 1) / np.mean(costs)
@@ -366,13 +413,13 @@ class DynagenOpt:
                     if need_cache:
                         cache_prefetch[cur_idx] = self.get_random_cache_prefetch_idx(i, j, k)
                     weight_prefetch[cur_idx] = self.get_random_weight_prefetch_idx(i, j)
-        
+
         for j in range(self.num_layers):
             if np.random.rand() <= self.mutate_rate:
                 weight_percent[j] = np.random.rand()
             if np.random.rand() <= self.mutate_rate:
                 cache_percent[j] = np.random.rand()
-    
+
     def best(self, population, costs):
         return np.argmin(costs)
 
@@ -406,13 +453,13 @@ class DynagenOpt:
                             token = i + 1
                         if token >= self.gen_len:
                             continue
-                        if layers_weights_sync[batch][layer] is None and loading_weights <= self.num_gpu_batches * 15:
+                        if layers_weights_sync[batch][layer] is None and loading_weights <= self.num_gpu_batches * 3:
                             self.weight_prefetch[self._idx(token, layer, batch)] = self._idx(i, j, k)
                             layers_weights_sync[batch][layer] = 1
                             loading_weights += 1
-                        if layers_cache_sync[batch][layer] is None and loading_caches <= 15:
+                        if layers_cache_sync[batch][layer] is None and loading_caches <= 3:
                             self.cache_prefetch[self._idx(token, layer, batch)] = self._idx(i, j, k)
-                            self.cpu_delegation[self._idx(token, layer, batch)] = False
+                            self.cpu_delegation[self._idx(token, layer, batch)] = batch % 2 == 0
                             layers_cache_sync[batch][layer] = 1
                             loading_caches += 1
                     # compute
@@ -477,7 +524,6 @@ class DynagenOptDP:
                 index -= index & (-index)
             return result
 
-
     # Counts from 0
     class Steps:
         def __init__(self, steps, num_layers):
@@ -499,8 +545,16 @@ class DynagenOptDP:
                     break
                 seg_idx -= 1
 
-
-    def __init__(self, num_layers, batch_size, num_gpu_batches, prompt_len, gen_len, gpu_memory_capacity, profiler=ProfilerConfig()):
+    def __init__(
+        self,
+        num_layers,
+        batch_size,
+        num_gpu_batches,
+        prompt_len,
+        gen_len,
+        gpu_memory_capacity,
+        profiler=ProfilerConfig(),
+    ):
         self.num_layers = num_layers
         self.batch_size = batch_size
         self.num_gpu_batches = num_gpu_batches
@@ -532,15 +586,15 @@ class DynagenOptDP:
         i, j = 0, 0
         for seg_idx, start, end, is_weight in self.steps:
             if not is_weight:
-                mem_consumption[start + 1:end + 1] = profiler.get_cache_size(batch_size, prompt_len + i)
+                mem_consumption[start + 1 : end + 1] = profiler.get_cache_size(batch_size, prompt_len + i)
                 continue
             for c in range(start, end):
                 if j == num_layers - 1:
-                    mem_consumption[c+1] = weight_sizes[j]
+                    mem_consumption[c + 1] = weight_sizes[j]
                     i += 1
                     j = 0
                 else:
-                    mem_consumption[c+1] = weight_sizes[j]
+                    mem_consumption[c + 1] = weight_sizes[j]
                     j += 1
         self.mem_consumption_cumsum = np.cumsum(mem_consumption).astype(np.uint64)  # Counts from 1
         weight_sizes = weight_sizes + np.insert(weight_sizes[:-1], 0, 0)
@@ -580,7 +634,12 @@ class DynagenOptDP:
     # Counts from 1
     def get_mem_consumption(self, c, is_weight, weight_step=None):
         if not is_weight and weight_step is not None:
-            result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[c - 1] + self.mem_consumption_cumsum[weight_step] - self.mem_consumption_cumsum[weight_step - 1]
+            result = (
+                self.mem_consumption_cumsum[c]
+                - self.mem_consumption_cumsum[c - 1]
+                + self.mem_consumption_cumsum[weight_step]
+                - self.mem_consumption_cumsum[weight_step - 1]
+            )
         else:
             result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[c - 1]
         return int(np.ceil(result / (1 << 30)))
@@ -588,7 +647,12 @@ class DynagenOptDP:
     # Counts from 1
     def get_mem_consumption_segsum(self, i, c, is_i_weight, weight_step=None):
         if not is_i_weight and weight_step is not None:
-            result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[i - 1] + self.mem_consumption_cumsum[weight_step] - self.mem_consumption_cumsum[weight_step - 1]
+            result = (
+                self.mem_consumption_cumsum[c]
+                - self.mem_consumption_cumsum[i - 1]
+                + self.mem_consumption_cumsum[weight_step]
+                - self.mem_consumption_cumsum[weight_step - 1]
+            )
         else:
             result = self.mem_consumption_cumsum[c] - self.mem_consumption_cumsum[i - 1]
         return int(np.ceil(result / (1 << 30)))
@@ -609,7 +673,9 @@ class DynagenOptDP:
 
     # Counts from 1
     def get_weight_loading_finished(self, prefetch_step, c):
-        return self.io_costs.get_cumsum(prefetch_step) + self.profiler.get_htod_cost(self.get_mem_consumption(c, True) << 30)
+        return self.io_costs.get_cumsum(prefetch_step) + self.profiler.get_htod_cost(
+            self.get_mem_consumption(c, True) << 30
+        )
 
     # Counts from 0
     def get_cache_prefetch_lower_bound(self, c):
@@ -617,17 +683,23 @@ class DynagenOptDP:
 
     # Counts from 1
     def get_cache_loading_finished(self, prefetch_step, c):
-        return self.io_costs.get_cumsum(prefetch_step) + self.profiler.get_htod_cost(self.get_mem_consumption(c, False) << 30)
+        return self.io_costs.get_cumsum(prefetch_step) + self.profiler.get_htod_cost(
+            self.get_mem_consumption(c, False) << 30
+        )
 
     # Counts from 0
     def update_io_costs(self, c, is_weight):
         prefetch_step = self.prefetch[c]
         cpu_del = prefetch_step == -1
         if not cpu_del:
-            self.io_costs.update(prefetch_step + 1, self.profiler.get_htod_cost(self.get_mem_consumption(c + 1, is_weight) << 30))
+            self.io_costs.update(
+                prefetch_step + 1, self.profiler.get_htod_cost(self.get_mem_consumption(c + 1, is_weight) << 30)
+            )
         if not is_weight:
             if cpu_del:
-                self.io_costs.update(c + 1, self.profiler.get_dtoh_cost(self.profiler.get_cache_size(self.batch_size, 1)))
+                self.io_costs.update(
+                    c + 1, self.profiler.get_dtoh_cost(self.profiler.get_cache_size(self.batch_size, 1))
+                )
             else:
                 self.io_costs.update(c + 1, self.profiler.get_dtoh_cost(self.get_mem_consumption(c + 1, False) << 30))
 
@@ -641,23 +713,35 @@ class DynagenOptDP:
                         if self.prefetch[c] != -1:
                             self.update_io_costs(c, is_weight)
                         else:
-                            assert not is_weight  # gpu_memory_lower_bound should guarantee that GPU is at least capable of holding the weight
-                            self.latency[c + 1][r] = self.latency[c][r] - self.get_compute(is_weight, True)  # CPU delegation
+                            assert (
+                                not is_weight
+                            )  # gpu_memory_lower_bound should guarantee that GPU is at least capable of holding the weight
+                            self.latency[c + 1][r] = self.latency[c][r] - self.get_compute(
+                                is_weight, True
+                            )  # CPU delegation
                     else:
                         if is_weight:
                             _c = max(c - 1, 0)
                             f_seg_idx = seg_idx if _c >= start else seg_idx - 1
                             weight_prefetch_lower_bound = self.get_weight_prefetch_lower_bound(c, c == end - 1)
-                            for _, i_start, i_end, is_i_weight in self.steps.riter(f_seg_idx, weight_prefetch_lower_bound):
-                                for i in range(min(_c, i_end - 1), max(weight_prefetch_lower_bound - 1, i_start - 1), -1):
-                                    mem_consumption_segsum = self.get_mem_consumption_segsum(i + 1, c + 1, is_i_weight, i_start)
+                            for _, i_start, i_end, is_i_weight in self.steps.riter(
+                                f_seg_idx, weight_prefetch_lower_bound
+                            ):
+                                for i in range(
+                                    min(_c, i_end - 1), max(weight_prefetch_lower_bound - 1, i_start - 1), -1
+                                ):
+                                    mem_consumption_segsum = self.get_mem_consumption_segsum(
+                                        i + 1, c + 1, is_i_weight, i_start
+                                    )
                                     if r < mem_consumption_segsum:
                                         self.update_io_costs(c, is_weight)
                                         break
                                     weight_loading_finished = self.get_weight_loading_finished(i + 1, c + 1)
                                     _r = 1 if r - mem_consumption_segsum == 0 else max(0, r - mem_consumption_segsum)
                                     weight_loading_latency = min(weight_loading_finished + self.latency[c][_r], 0)
-                                    new_latency = self.latency[c][_r] + weight_loading_latency - self.get_compute(is_weight)
+                                    new_latency = (
+                                        self.latency[c][_r] + weight_loading_latency - self.get_compute(is_weight)
+                                    )
                                     if self.latency[c + 1][r] < new_latency:
                                         self.latency[c + 1][r] = new_latency
                                         if r == self.gpu_memory_capacity:
@@ -675,15 +759,23 @@ class DynagenOptDP:
                         cache_prefetch_lower_bound = self.get_cache_prefetch_lower_bound(c)
                         cache_prefetch_upper_bound = c - 1 if c > start else start - 2
                         for _, i_start, i_end, is_i_weight in self.steps.riter(f_seg_idx, cache_prefetch_lower_bound):
-                            for i in range(min(cache_prefetch_upper_bound, i_end - 1), max(cache_prefetch_lower_bound - 1, i_start - 1), -1):
-                                mem_consumption_segsum = self.get_mem_consumption_segsum(i + 1, c + 1, is_i_weight, i_start)
+                            for i in range(
+                                min(cache_prefetch_upper_bound, i_end - 1),
+                                max(cache_prefetch_lower_bound - 1, i_start - 1),
+                                -1,
+                            ):
+                                mem_consumption_segsum = self.get_mem_consumption_segsum(
+                                    i + 1, c + 1, is_i_weight, i_start
+                                )
                                 if r < mem_consumption_segsum:
                                     self.update_io_costs(c, is_weight)
                                     break
                                 cache_loading_finished = self.get_cache_loading_finished(i + 1, c + 1)
                                 _r = 1 if r - mem_consumption_segsum == 0 else max(0, r - mem_consumption_segsum)
                                 cache_loading_latency = min(cache_loading_finished + self.latency[c][_r], 0)
-                                new_latency = self.latency[c][_r] + cache_loading_latency - self.get_compute(is_weight, False)
+                                new_latency = (
+                                    self.latency[c][_r] + cache_loading_latency - self.get_compute(is_weight, False)
+                                )
                                 if self.latency[c + 1][r] < new_latency:
                                     self.latency[c + 1][r] = new_latency
                                     if r == self.gpu_memory_capacity:
@@ -728,47 +820,71 @@ class PrefetchPolicy:
     mem_consumption: np.ndarray
 
     def copy_original(self):
-        return PrefetchPolicy(self.io_prefetch_sequence.copy(), IIBTree(self.compute_step_btree.items()), IOBTree(self.prefetch_step_btree.items()), self.latencies.copy(), self.mem_consumption.copy())
+        return PrefetchPolicy(
+            self.io_prefetch_sequence.copy(),
+            IIBTree(self.compute_step_btree.items()),
+            IOBTree(self.prefetch_step_btree.items()),
+            self.latencies.copy(),
+            self.mem_consumption.copy(),
+        )
 
     def copy(self):
         latencies = np.append(self.latencies, 0)
         mem_consumption = np.append(self.mem_consumption, self.mem_consumption[-1])
-        return PrefetchPolicy(self.io_prefetch_sequence.copy(), IIBTree(self.compute_step_btree.items()), IOBTree(self.prefetch_step_btree.items()), latencies, mem_consumption)
+        return PrefetchPolicy(
+            self.io_prefetch_sequence.copy(),
+            IIBTree(self.compute_step_btree.items()),
+            IOBTree(self.prefetch_step_btree.items()),
+            latencies,
+            mem_consumption,
+        )
 
     def insert_weight_prefetch(self, compute_step, prefetch_step, size, io_cost):
         last_io_prefetch_idx = self.prefetch_step_btree.get(prefetch_step, None)
-        last_finish = 0 if last_io_prefetch_idx is None else self.io_prefetch_sequence[last_io_prefetch_idx]['finish'].max()
+        last_finish = (
+            0 if last_io_prefetch_idx is None else self.io_prefetch_sequence[last_io_prefetch_idx]["finish"].max()
+        )
         finish = last_finish + io_cost
         self.io_prefetch_sequence = np.append(
             self.io_prefetch_sequence,
-            np.array([(compute_step, prefetch_step, size, True, finish)], dtype=self.io_prefetch_sequence.dtype)
+            np.array([(compute_step, prefetch_step, size, True, finish)], dtype=self.io_prefetch_sequence.dtype),
         )
         self.compute_step_btree[compute_step] = len(self.io_prefetch_sequence) - 1
-        self.prefetch_step_btree[prefetch_step] = [*self.prefetch_step_btree.get(prefetch_step, ()), len(self.io_prefetch_sequence) - 1]
+        self.prefetch_step_btree[prefetch_step] = [
+            *self.prefetch_step_btree.get(prefetch_step, ()),
+            len(self.io_prefetch_sequence) - 1,
+        ]
         self.mem_consumption[prefetch_step:] += size
 
         for filtered_io_prefetch_idx in self.prefetch_step_btree.values(min=prefetch_step, excludemin=True):
-            self.io_prefetch_sequence['finish'][filtered_io_prefetch_idx] += io_cost
+            self.io_prefetch_sequence["finish"][filtered_io_prefetch_idx] += io_cost
 
     def insert_cache_prefetch(self, compute_step, prefetch_step, size, io_cost):
         last_io_prefetch_idx = self.prefetch_step_btree.get(prefetch_step, None)
-        last_finish = 0 if last_io_prefetch_idx is None else self.io_prefetch_sequence[last_io_prefetch_idx]['finish'].max()
+        last_finish = (
+            0 if last_io_prefetch_idx is None else self.io_prefetch_sequence[last_io_prefetch_idx]["finish"].max()
+        )
         finish = last_finish + io_cost
         self.io_prefetch_sequence = np.append(
             self.io_prefetch_sequence,
-            np.array([(compute_step, prefetch_step, size, False, finish)], dtype=self.io_prefetch_sequence.dtype)
+            np.array([(compute_step, prefetch_step, size, False, finish)], dtype=self.io_prefetch_sequence.dtype),
         )
         self.compute_step_btree[compute_step] = len(self.io_prefetch_sequence) - 1
-        self.prefetch_step_btree[prefetch_step] = [*self.prefetch_step_btree.get(prefetch_step, ()), len(self.io_prefetch_sequence) - 1]
+        self.prefetch_step_btree[prefetch_step] = [
+            *self.prefetch_step_btree.get(prefetch_step, ()),
+            len(self.io_prefetch_sequence) - 1,
+        ]
         self.mem_consumption[prefetch_step:] += size
 
         for filtered_io_prefetch_idx in self.prefetch_step_btree.values(min=prefetch_step, excludemin=True):
-            self.io_prefetch_sequence['finish'][filtered_io_prefetch_idx] += io_cost
+            self.io_prefetch_sequence["finish"][filtered_io_prefetch_idx] += io_cost
 
     def update_latencies(self, prefetch_step, compute_cost):
         for i in range(prefetch_step, len(self.latencies)):
             filtered_io_prefetch = self.io_prefetch_sequence[self.compute_step_btree.get(i, [])]
-            wait_time = 0 if filtered_io_prefetch.size == 0 else max(0, filtered_io_prefetch['finish'] - self.latencies[i - 1])
+            wait_time = (
+                0 if filtered_io_prefetch.size == 0 else max(0, filtered_io_prefetch["finish"] - self.latencies[i - 1])
+            )
             self.latencies[i] += self.latencies[i - 1] + wait_time + compute_cost[i]
 
     def get_last_latency(self):
@@ -779,7 +895,16 @@ class PrefetchPolicy:
 
 
 class DynagenOptBruteforce:
-    def __init__(self, num_layers, batch_size, num_gpu_batches, prompt_len, gen_len, gpu_memory_capacity, profiler=ProfilerConfig()):
+    def __init__(
+        self,
+        num_layers,
+        batch_size,
+        num_gpu_batches,
+        prompt_len,
+        gen_len,
+        gpu_memory_capacity,
+        profiler=ProfilerConfig(),
+    ):
         self.num_layers = num_layers
         self.batch_size = batch_size
         self.num_gpu_batches = num_gpu_batches
@@ -792,20 +917,29 @@ class DynagenOptBruteforce:
         self.weight_sizes = profiler.get_weights()
         self.policies = np.full(self.n + 1, None, dtype=object)
         self.policies[1] = PrefetchPolicy(
-            np.array([(1, 0, self.weight_sizes[0], True, 0.)], dtype=[('compute_step', 'i8'), ('prefetch_step', 'i8'), ('size', 'i8'), ('is_weight', '?'), ('finish', 'f8')]),
+            np.array(
+                [(1, 0, self.weight_sizes[0], True, 0.0)],
+                dtype=[
+                    ("compute_step", "i8"),
+                    ("prefetch_step", "i8"),
+                    ("size", "i8"),
+                    ("is_weight", "?"),
+                    ("finish", "f8"),
+                ],
+            ),
             IIBTree({1: 0}),
             IOBTree({0: (0,)}),
             np.array([0, self.profiler.get_compute_mlp_gpu()]),
-            np.array([0, self.weight_sizes[0]])
+            np.array([0, self.weight_sizes[0]]),
         )
 
         self.compute_costs = np.zeros(self.n + 1)
         i, j = 0, 0
         for c in range(1, self.n + 1, num_gpu_batches):
             if j % 2 == 0 or j == self.num_layers - 1:
-                self.compute_costs[c:c + num_gpu_batches] = self.profiler.get_compute_mlp_gpu()
+                self.compute_costs[c : c + num_gpu_batches] = self.profiler.get_compute_mlp_gpu()
             else:
-                self.compute_costs[c:c + num_gpu_batches] = self.profiler.get_compute_cache_gpu()
+                self.compute_costs[c : c + num_gpu_batches] = self.profiler.get_compute_cache_gpu()
             j += 1
             if j == num_layers - 1:
                 j = 0
@@ -863,7 +997,9 @@ class DynagenOptBruteforce:
                     policy = prev_policy.copy_original()
                     if self.is_weight_prefetch_valid(c):
                         weight_size = self.get_weight_size(c)
-                        policy.insert_weight_prefetch(c, i_weight, weight_size, self.profiler.get_htod_cost(weight_size))
+                        policy.insert_weight_prefetch(
+                            c, i_weight, weight_size, self.profiler.get_htod_cost(weight_size)
+                        )
 
                     if self.is_cache_prefetch_valid(c):
                         cache_size = self.get_cache_size(c)
@@ -894,15 +1030,28 @@ class DynagenOptBruteforce:
                 cpu_delegation[self._decode(compute_step - 1)] = 1
         return cache_prefetch, weight_prefetch, cpu_delegation
 
+
 class DynagenOptWorksetHeuristic:
-    def __init__(self, num_layers, batch_size, num_gpu_batches, prompt_len, gen_len, gpu_memory_capacity, profiler=ProfilerConfig(), max_num_prefetch_batches=0):
+    def __init__(
+        self,
+        num_layers,
+        batch_size,
+        num_gpu_batches,
+        prompt_len,
+        gen_len,
+        gpu_memory_capacity,
+        profiler=ProfilerConfig(),
+        max_num_prefetch_batches=0,
+    ):
         self.num_layers = num_layers
         self.batch_size = batch_size
         self.num_gpu_batches = num_gpu_batches
         self.prompt_len = prompt_len
         self.gen_len = gen_len
         self.gpu_memory_capacity = gpu_memory_capacity
-        self.max_num_prefetch_batches = max(0, min(num_layers * num_gpu_batches - 1, max_num_prefetch_batches))  # clamp(max_num_prefetch_batches, 0, num_layers * num_gpu_batches - 1)
+        self.max_num_prefetch_batches = max(
+            0, min(num_layers * num_gpu_batches - 1, max_num_prefetch_batches)
+        )  # clamp(max_num_prefetch_batches, 0, num_layers * num_gpu_batches - 1)
         self.profiler = profiler
 
         self.weight_sizes = profiler.get_weights()
@@ -969,7 +1118,7 @@ class DynagenOptWorksetHeuristic:
             weight_prefetched[start:stop] = False
             stop -= 1
             k = (stop - 1) % self.num_gpu_batches
-            weight_prefetched[stop:stop + self.num_gpu_batches - k] = False
+            weight_prefetched[stop : stop + self.num_gpu_batches - k] = False
 
         def reset_cache_prefetched(start, stop):
             for c in range(start, stop):
@@ -979,7 +1128,7 @@ class DynagenOptWorksetHeuristic:
         mem_consumption = self.weight_sizes[0]
         remaining_sizes = IOBTree()
         weight_prefetched = np.zeros(self.n + 1, bool)
-        weight_prefetched[:self.num_gpu_batches + 1] = True
+        weight_prefetched[: self.num_gpu_batches + 1] = True
         cache_prefetched = np.zeros(self.n + 1, bool)
         for i in range(1, self.n + 1):
             if not self.need_cache(i):
@@ -996,7 +1145,7 @@ class DynagenOptWorksetHeuristic:
                     if mem_consumption + weight_size > self.gpu_memory_capacity << 30:
                         break
                     mem_consumption += weight_size
-                    weight_prefetched[p:p + self.num_gpu_batches] = True
+                    weight_prefetched[p : p + self.num_gpu_batches] = True
                 if cache_size > 0 and not cache_prefetched[p]:
                     if mem_consumption + cache_size > self.gpu_memory_capacity << 30:
                         break
@@ -1018,7 +1167,7 @@ class DynagenOptWorksetHeuristic:
                 weight_size = self.get_weight_size(p)
                 cache_size = self.get_cache_size(p)
                 if not weight_prefetched[c]:
-                    assert i != c, 'weight for the current computing step should not be prefetched in the same step'
+                    assert i != c, "weight for the current computing step should not be prefetched in the same step"
                     i = get_first_step_remaining(weight_size, c, True)
                     reset_weight_prefetched(i + 1, c)
                     reset_cache_prefetched(i + 1, c)
