@@ -18,6 +18,7 @@ from flexgen.pytorch_backend import (
     TorchDisk,
     get_torch_mixed_device_mem_manager,
     fix_recursive_import,
+    DeviceType,
 )
 from flexgen.flex_opt import (
     Policy,
@@ -172,8 +173,18 @@ class LlamaSelfAttention(SelfAttention):
         weights = init_weight_list(weight_specs, self.policy, self.env)
         weight_home.store(weights)
 
-    def load_weight(self, weight_home, weight_read_buf, k):
+    def load_weight(
+        self,
+        weight_home,
+        weight_read_buf,
+        k,
+    ):
+        global BLS
         w_ln, w_q, w_k, w_v, w_re, w_o = weight_home.val
+        tensors = [w_ln, w_q, w_k, w_v, w_re, w_o]
+        cpu_tensors = [(i, t) for i, t in enumerate(tensors) if t.device.device_type == DeviceType.CPU]
+        if cpu_tensors:
+            min_idx, min_tensor = min(cpu_tensors, key=lambda x: x[1].bytes)
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
@@ -187,6 +198,9 @@ class LlamaSelfAttention(SelfAttention):
                     w_o.smart_copy(dst1),
                 )
             )
+            if cpu_tensors and BLS > 0:
+                weight_home.val[min_idx] = weight_read_buf.val[min_idx][0]
+                BLS -= 8
 
     def pop_weight(self, weight_read_buf):
         weight_read_buf.pop()
@@ -298,12 +312,17 @@ class LlamaMLP(MLP):
 
     def load_weight(self, weight_home, weight_read_buf, k):
         w_ln, w_g, w_u, w_d = weight_home.val
+        # tensors = [w_ln, w_g, w_u, w_d]
+        # cpu_tensors = [(i, t) for i, t in enumerate(tensors) if t.device.device_type == DeviceType.CPU]
+        # if cpu_tensors:
+        #     min_idx, min_tensor = min(cpu_tensors, key=lambda x: x[1].bytes)
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
             weight_read_buf.store(
                 (w_ln.smart_copy(dst2), w_g.smart_copy(dst1), w_u.smart_copy(dst1), w_d.smart_copy(dst1))
             )
+            # weight_home.val[min_idx] = weight_read_buf.val[min_idx][0]
 
     def pop_weight(self, weight_read_buf):
         weight_read_buf.pop()
@@ -377,7 +396,10 @@ class LlamaLM(OptLM):
         self.store_cache_stream = torch.cuda.Stream()
         if parser.parse_args().computation_policy == "stream":
             self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
-        elif parser.parse_args().computation_policy == "alter_stream" or parser.parse_args().computation_policy == "optimize":
+        elif (
+            parser.parse_args().computation_policy == "alter_stream"
+            or parser.parse_args().computation_policy == "optimize"
+        ):
             self.stream_manager = ComputationStreamAlterManager(32)
             self.cache_loader = CacheLoaderManager(32)
 
@@ -596,10 +618,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     add_parser_arguments(parser)
     args = parser.parse_args()
-    auto_pop = args.computation_policy == "default" or (
-        args.computation_policy == "alter_stream" and args.num_gpu_batches == 1
-    ) or args.computation_policy == "optimize"
-
+    auto_pop = (
+        args.computation_policy == "default"
+        or (args.computation_policy == "alter_stream" and args.num_gpu_batches == 1)
+        or args.computation_policy == "optimize"
+    )
+    BLS = 0
+    if not args.computation_policy == "default":
+        BLS = args.num_gpu_batches * args.gpu_batch_size
     assert len(args.percent) == 6
 
     run_flexgen(args)

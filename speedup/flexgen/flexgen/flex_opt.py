@@ -1060,7 +1060,7 @@ class OptLM:
             self.init_weight(j)
 
     def delete_all_weights(self):
-        for j in range(self.num_layers):
+        for j in tqdm(range(self.num_layers)):
             self.delete_weight(j, 0)
 
     def update_attention_mask(self, i, k):

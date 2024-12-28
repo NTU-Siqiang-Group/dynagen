@@ -168,7 +168,6 @@ class ComputationPolicyImpl(ComputationPolicyInterface):
                 this.update_attention_mask(i, k)
             for j in range(this.num_layers):
                 for k in range(this.num_gpu_batches):
-                    print(f"i: {i}, j: {j}, k: {k}")
                     this.load_weight(i, j + 1, k)
                     this.load_cache(i, j, k + 1)
                     this.store_hidden(i, j, k - 1)
