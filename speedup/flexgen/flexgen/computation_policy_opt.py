@@ -28,8 +28,8 @@ class MultiStreamBase:
 
 
 def wait_stream_finish(f):
-    stream = f.result() 
-    if stream is not None:  
+    stream = f.result()
+    if stream is not None:
         # print("Synchronizing stream")
         stream.synchronize()
 
@@ -68,12 +68,14 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                 wait_stream_finish(layers_cache_sync[j])
             layers_cache_sync[j] = None
             cpu_del = j % 4 == 0
-            # this.load_weight(i, j+1 ,0)
+            # this.load_weight(i, j + 1, 0)
             # this.load_cache(i,j+1,0)
             this.load_hidden(i, j, 0)
-            this.compute_layer(i, j, 0, cpu_delegation=True)
+            this.compute_layer(i, j, 0, cpu_delegation=False)
+            if j == this.num_layers - 1:
+                this.sync()
             this.store_cache(i, j - 1, 0)
-            this.store_hidden(i, j, 0)
+            this.store_hidden(i, j - 1, 0)
 
         layers_weights_sync = [None for _ in range(this.num_layers)]
         layers_cache_sync = [None for _ in range(this.num_layers)]
@@ -86,7 +88,8 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             for j in range(this.num_layers):
                 loading_weights = sum(x is not None for x in layers_weights_sync)
                 loading_caches = sum(x is not None for x in layers_cache_sync)
-                for l in range(j + 1, j + 20):
+                step = j + 2 if i == 0 else j + 10
+                for l in range(j + 1, step):
                     layer = l
                     token = i
                     if layer >= this.num_layers:
@@ -94,11 +97,11 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                         token = i + 1
                     if token >= this.execute_gen_len:
                         continue
-                    if layers_weights_sync[layer] is None and loading_weights <= 8:
+                    if layers_weights_sync[layer] is None and loading_weights <= 4:
                         f = this.cache_loader.load_cache(True, load_layer_weight, token, layer)
                         layers_weights_sync[layer] = f
-                    if layers_cache_sync[layer] is None and loading_caches <= 8:
-                        f = this.cache_loader.load_cache(True, load_layer_cache, token, layer, 0, layer % 4 ==0)
+                    if layers_cache_sync[layer] is None and loading_caches <= 4:
+                        f = this.cache_loader.load_cache(True, load_layer_cache, token, layer, 0, False)
                         layers_cache_sync[layer] = f
 
                 compute_layer(i, j, layers_weights_sync, layers_cache_sync)
@@ -128,7 +131,14 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
 
         # optimizer = DynagenOptWorksetHeuristic(this.num_layers, this.policy.gpu_batch_size, this.num_gpu_batches, 1024, this.execute_gen_len, 23, Llama13BConfig())
         # optimizer.optimize()
-        optimizer = DynagenOpt(this.num_layers, this.policy.gpu_batch_size, this.num_gpu_batches, 1024, this.execute_gen_len, Llama13BConfig())
+        optimizer = DynagenOpt(
+            this.num_layers,
+            this.policy.gpu_batch_size,
+            this.num_gpu_batches,
+            1024,
+            this.execute_gen_len,
+            Llama13BConfig(),
+        )
         optimizer.optimize_alter_v2()
         cache_prefetch, weight_prefetch, cpu_delegation = optimizer.get_policy()
 
@@ -152,11 +162,11 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                     weight_prefetches = []
                     if (i, j, k) in weight_prefetch:
                         weight_prefetches = weight_prefetch[(i, j, k)]
-                    for (token, layer, batch) in cache_prefetches:
+                    for token, layer, batch in cache_prefetches:
                         cpu_del = cpu_delegation[(token, layer, batch)]
                         f = this.cache_loader.load_cache(True, load_layer_cache, token, layer, batch, cpu_del)
                         layers_cache_sync[batch][layer] = f
-                    for (token, layer, batch) in weight_prefetches:
+                    for token, layer, batch in weight_prefetches:
                         f = this.cache_loader.load_cache(True, load_layer_weight, token, layer, batch)
                         layers_weights_sync[batch][layer] = f
 

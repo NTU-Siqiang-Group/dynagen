@@ -453,13 +453,13 @@ class DynagenOpt:
                             token = i + 1
                         if token >= self.gen_len:
                             continue
-                        if layers_weights_sync[batch][layer] is None and loading_weights <= self.num_gpu_batches * 2:
+                        if layers_weights_sync[batch][layer] is None and loading_weights <= self.num_gpu_batches * 8:
                             self.weight_prefetch[self._idx(token, layer, batch)] = self._idx(i, j, k)
                             layers_weights_sync[batch][layer] = 1
                             loading_weights += 1
-                        if layers_cache_sync[batch][layer] is None and loading_caches <= 4:
+                        if layers_cache_sync[batch][layer] is None and loading_caches <= 16:
                             self.cache_prefetch[self._idx(token, layer, batch)] = self._idx(i, j, k)
-                            self.cpu_delegation[self._idx(token, layer, batch)] = 0
+                            self.cpu_delegation[self._idx(token, layer, batch)] = batch % 2 == 0
                             layers_cache_sync[batch][layer] = 1
                             loading_caches += 1
                     # compute
