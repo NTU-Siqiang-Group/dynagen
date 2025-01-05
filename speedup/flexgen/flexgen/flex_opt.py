@@ -6,8 +6,6 @@ python3 -m flexgen.flex_opt --model facebook/opt-1.3b --gpu-batch-size 32 --perc
 import argparse
 import dataclasses
 import os
-import pickle
-import time
 from typing import Union, List, Optional
 
 import numpy as np
@@ -16,15 +14,15 @@ import torch
 from transformers import AutoTokenizer
 from flexgen.computation_policy import get_computation_policy
 from flexgen.computation_policy_streams import ComputationStreams
+from flexgen.computation_policy_alter_stream import ComputationStreamAlterManager, CacheLoaderManager
 
 from flexgen.compression import CompressionConfig
 from flexgen.opt_config import OptConfig, get_opt_config, download_opt_weights
 from flexgen.pytorch_backend import (
     TorchDevice,
     TorchDisk,
-    TorchLink,
-    TorchMixedDevice,
     DeviceType,
+    get_torch_mixed_device_mem_manager,
     general_copy,
     fix_recursive_import,
 )
@@ -33,17 +31,14 @@ from flexgen.utils import (
     Task,
     ExecutionEnv,
     GB,
-    T,
     ValueHolder,
     array_1d,
     array_2d,
     array_3d,
     str2bool,
     project_decode_latency,
-    torch_mem_stats,
     torch_dtype_to_np_dtype,
     write_benchmark_log,
-    read_benchmark_log,
 )
 
 fix_recursive_import()
@@ -219,8 +214,7 @@ class InputEmbed:
             donate[1] = False
         else:
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (w_token, donate[2]), (w_pos, donate[3]) = weight_read_buf.pop()
         else:
@@ -285,7 +279,7 @@ class OutputEmbed:
         donate = [False] * 4
         h, donate[0] = hidden.val, True
 
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (w_ln, donate[1]), (b_ln, donate[2]), (w_token, donate[3]) = weight_read_buf.pop()
         else:
@@ -342,6 +336,7 @@ class SelfAttention:
         weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
+        # TODO: global BLS?
         w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight_home.val
         if k == 0:
             dst1 = self.weight_load_dst
@@ -568,9 +563,9 @@ class SelfAttention:
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, cpu_delegation=None):
         n_head = self.config.n_head
         if not cpu_delegation is None:
-          attention_compute = self.env.cpu if cpu_delegation else self.env.gpu
+            attention_compute = self.env.cpu if cpu_delegation else self.env.gpu
         else:
-          attention_compute = self.attention_compute
+            attention_compute = self.attention_compute
         donate = [False] * 14
         h, donate[0] = hidden.val, True
         if isinstance(attention_mask, tuple):
@@ -582,7 +577,7 @@ class SelfAttention:
                 mask_gpu, donate[1] = attention_mask.val.smart_copy(self.compute)
             else:
                 mask_gpu, donate[1] = attention_mask.val.smart_copy(attention_compute)
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (
                 (w_q, donate[2]),
@@ -729,8 +724,7 @@ class MLP:
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k):
         donate = [False] * 7
         h, donate[0] = hidden.val, True
-
-        if k == self.policy.num_gpu_batches - 1:
+        if auto_pop and k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             (
                 (wi, donate[1]),
@@ -800,7 +794,7 @@ class OptLM:
         self.path = path
         self.policy = policy
         self.num_gpu_batches = policy.num_gpu_batches
-        self.computation_policy = get_computation_policy('stream')
+        self.computation_policy = get_computation_policy(parser.parse_args().computation_policy)
 
         layers = []
         layers.append(InputEmbed(self.config, self.env, self.policy))
@@ -827,8 +821,14 @@ class OptLM:
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
-        
-        self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
+        if parser.parse_args().computation_policy == "stream":
+            self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
+        elif (
+            parser.parse_args().computation_policy == "alter_stream"
+            or parser.parse_args().computation_policy == "optimize"
+        ):
+            self.stream_manager = ComputationStreamAlterManager(32)
+            self.cache_loader = CacheLoaderManager(32)
 
         # Intermediate tensors
         # The following buffers store values used
@@ -1251,6 +1251,7 @@ def get_inputs(prompt_len, num_prompts, tokenizer, path):
 
 
 def run_flexgen(args):
+    print(f"<run_flexgen>: args.model: {args.model}")
     if args.model == "facebook/galactica-30b":
         tokenizer = AutoTokenizer.from_pretrained("facebook/galactica-30b", padding_side="left")
     else:
@@ -1265,7 +1266,7 @@ def run_flexgen(args):
     gpu = TorchDevice("cuda:0")
     cpu = TorchDevice("cpu")
     disk = TorchDisk(args.offload_dir)
-    env = ExecutionEnv(gpu=gpu, cpu=cpu, disk=disk, mixed=TorchMixedDevice([gpu, cpu, disk]))
+    env = ExecutionEnv(gpu=gpu, cpu=cpu, disk=disk, mixed=get_torch_mixed_device_mem_manager("default", [gpu, cpu, disk]))
 
     policy = Policy(
         args.gpu_batch_size,
@@ -1291,11 +1292,20 @@ def run_flexgen(args):
     opt_config = get_opt_config(args.model)
     cache_size = opt_config.cache_bytes(num_prompts, prompt_len + gen_len)
     hidden_size = opt_config.hidden_bytes(num_prompts, prompt_len + gen_len)
+    print(
+        f"model size: {opt_config.model_bytes()/GB:.3f} GB, "
+        f"cache size: {cache_size/GB:.3f} GB, "
+        f"hidden size (prefill): {hidden_size/GB:.3f} GB"
+    )
+
+    print("init weight...")
     model = OptLM(opt_config, env, args.path, policy)
 
     try:
+        print("warmup - generate")
         output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
 
+        print("benchmark - generate")
         timers("generate").reset()
         output_ids = model.generate(
             inputs,
@@ -1323,17 +1333,40 @@ def run_flexgen(args):
     _, gpu_peak_mem = gpu.mem_stats()
     _, cpu_peak_mem = cpu.mem_stats()
 
+    if DUMMY_WEIGHT not in args.path:
+        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+        show_str = "Outputs:\n" + 70 * "-" + "\n"
+        for i in [0]:
+            show_str += f"{i}: {outputs[i]}\n"
+            show_str += "-" * 70 + "\n"
+        if args.verbose >= 2:
+            print(show_str)
+
+    gpu.print_stats()
+    cpu.print_stats()
     projected = bool(args.debug_mode or cut_gen_len)
 
-    print("+++++++++++++++++++++++++++++++++++++++++++++++++")
-    if args.compress_cache:
-        print("FlexGen + INT4")
+    if args.log_file == "auto":
+        filename = get_filename(args) + ".log"
     else:
-        print("FlexGen")
-    print("input: " + str(prompt_len) + " output: " + str(gen_len) + " bsz: " + str(num_prompts))
-    print("+++++++++++++++++++++++++++++++++++++++++++++++++")
-    print("Total: " + str(total_latency) + " Prefill: " + str(prefill_latency) + " Decode: " + str(decode_latency))
-    print("=================================================")
+        filename = args.log_file
+
+    log_str = write_benchmark_log(
+        filename,
+        opt_config.model_bytes(),
+        cache_size,
+        hidden_size,
+        gpu_peak_mem,
+        projected,
+        prefill_latency,
+        prefill_throughput,
+        decode_latency,
+        decode_throughput,
+        total_latency,
+        total_throughput,
+    )
+    if args.verbose >= 1:
+        print(log_str)
 
 
 def add_parser_arguments(parser):
@@ -1383,13 +1416,22 @@ def add_parser_arguments(parser):
 
     parser.add_argument("--warmup-input-path", type=str, default="./pg19_firstbook.txt")
     parser.add_argument("--test-input-path", type=str, default="./pg19_firstbook.txt")
+    parser.add_argument("--computation-policy", type=str, default="default")
 
 
 if __name__ == "__main__":
+    os.chdir(os.path.dirname(os.path.realpath(__file__)))
     parser = argparse.ArgumentParser()
     add_parser_arguments(parser)
     args = parser.parse_args()
-
+    auto_pop = (
+        args.computation_policy == "default"
+        or (args.computation_policy == "alter_stream" and args.num_gpu_batches == 1)
+        or args.computation_policy == "optimize"
+    )
+    BLS = 0
+    if not args.computation_policy == "default":
+        BLS = args.num_gpu_batches * args.gpu_batch_size
     assert len(args.percent) == 6
 
     run_flexgen(args)
