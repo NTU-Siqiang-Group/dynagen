@@ -200,7 +200,7 @@ class LlamaSelfAttention(SelfAttention):
             )
             if cpu_tensors and BLS > 0:
                 weight_home.val[min_idx] = weight_read_buf.val[min_idx][0]
-                BLS -= 8
+                BLS -= 4
 
     def pop_weight(self, weight_read_buf):
         weight_read_buf.pop()

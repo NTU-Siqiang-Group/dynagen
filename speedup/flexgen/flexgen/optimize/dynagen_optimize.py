@@ -445,7 +445,8 @@ class DynagenOpt:
                 for k in range(self.num_gpu_batches):
                     loading_weights = sum(x is not None for sublist in layers_weights_sync for x in sublist)
                     loading_caches = sum(x is not None for sublist in layers_cache_sync for x in sublist)
-                    for l in range(k + 1, k + self.num_gpu_batches * 10):
+                    step = k + 2 if i == 0 else k + self.num_gpu_batches * 10
+                    for l in range(k + 1, step):
                         batch = l % self.num_gpu_batches
                         layer = j + l // self.num_gpu_batches
                         token = i
@@ -454,11 +455,11 @@ class DynagenOpt:
                             token = i + 1
                         if token >= self.gen_len:
                             continue
-                        if layers_weights_sync[batch][layer] is None and loading_weights <= self.num_gpu_batches * 17:
+                        if layers_weights_sync[batch][layer] is None and loading_weights <= self.num_gpu_batches * 8:
                             self.weight_prefetch[self._idx(token, layer, batch)] = self._idx(i, j, k)
                             layers_weights_sync[batch][layer] = 1
                             loading_weights += 1
-                        if layers_cache_sync[batch][layer] is None and loading_caches <= 17:
+                        if layers_cache_sync[batch][layer] is None and loading_caches <= 16:
                             self.cache_prefetch[self._idx(token, layer, batch)] = self._idx(i, j, k)
                             self.cpu_delegation[self._idx(token, layer, batch)] = 0
                             layers_cache_sync[batch][layer] = 1
@@ -1033,14 +1034,26 @@ class DynagenOptBruteforce:
 
 
 class DynagenOptWorksetHeuristic:
-    def __init__(self, num_layers, batch_size, num_gpu_batches, prompt_len, gen_len, gpu_memory_capacity, profiler=ProfilerConfig(), max_num_prefetch_batches=0):
+    def __init__(
+        self,
+        num_layers,
+        batch_size,
+        num_gpu_batches,
+        prompt_len,
+        gen_len,
+        gpu_memory_capacity,
+        profiler=ProfilerConfig(),
+        max_num_prefetch_batches=0,
+    ):
         self.num_layers = num_layers
         self.batch_size = batch_size
         self.num_gpu_batches = num_gpu_batches
         self.prompt_len = prompt_len
         self.gen_len = gen_len
         self.gpu_memory_capacity = int(gpu_memory_capacity * (1 << 30))
-        self.max_num_prefetch_batches = max(0, min(num_layers * num_gpu_batches - 1, max_num_prefetch_batches))  # clamp(max_num_prefetch_batches, 0, num_layers * num_gpu_batches - 1)
+        self.max_num_prefetch_batches = max(
+            0, min(num_layers * num_gpu_batches - 1, max_num_prefetch_batches)
+        )  # clamp(max_num_prefetch_batches, 0, num_layers * num_gpu_batches - 1)
         self.profiler = profiler
 
         self.weight_sizes = profiler.get_weights()
@@ -1104,7 +1117,7 @@ class DynagenOptWorksetHeuristic:
         mem_consumption = self.weight_sizes[0]
         remaining_sizes = QOBTree()
         weight_prefetched = np.zeros(self.n + 1, bool)
-        weight_prefetched[:self.num_gpu_batches + 1] = True
+        weight_prefetched[: self.num_gpu_batches + 1] = True
         cache_prefetched = np.zeros(self.n + 1, bool)
         for i in range(1, self.n + 1):
             if not self.need_cache(i):
@@ -1121,7 +1134,7 @@ class DynagenOptWorksetHeuristic:
                     if mem_consumption + weight_size > self.gpu_memory_capacity:
                         break
                     mem_consumption += weight_size
-                    weight_prefetched[p:p + self.num_gpu_batches] = True
+                    weight_prefetched[p : p + self.num_gpu_batches] = True
                     self.weight_prefetch[p] = i
                 if cache_size > 0 and not cache_prefetched[p]:
                     if mem_consumption + cache_size > self.gpu_memory_capacity:
@@ -1143,7 +1156,7 @@ class DynagenOptWorksetHeuristic:
                         if r not in remaining_sizes:
                             remaining_sizes[r] = (c, mem_consumption)
                 if not weight_prefetched[c]:
-                    assert i != c, 'weight for the current computing step should not be prefetched in the same step'
+                    assert i != c, "weight for the current computing step should not be prefetched in the same step"
                     i, mem_consumption = get_first_step_remaining(weight_size, c, True)
                     break
                 if not cache_prefetched[c]:
@@ -1171,7 +1184,9 @@ class DynagenOptWorksetHeuristic:
             if self.weight_prefetch[c] != 0 and self.need_weight(c):
                 assert k == 0
                 for batch in range(self.num_gpu_batches):
-                    weight_prefetch.setdefault(self._decode(self.weight_prefetch[c] + batch - 1), []).append((i, j, batch))
+                    weight_prefetch.setdefault(self._decode(self.weight_prefetch[c] + batch - 1), []).append(
+                        (i, j, batch)
+                    )
             cpu_delegation[(i, j, k)] = self.cpu_del[c]
             k += 1
             if k == self.num_gpu_batches:

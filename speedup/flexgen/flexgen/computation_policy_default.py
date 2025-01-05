@@ -145,7 +145,7 @@ class ComputationPolicyImpl(ComputationPolicyInterface):
                 if evaluate and j == this.num_layers - 1:
                     this.sync()
                     break
-                this.store_cache(i, j - 1, 0)
+                this.store_cache(i, j - 1, 0, overlap=False)
                 this.store_hidden(i, j, 0)
 
                 this.sync()
@@ -173,7 +173,7 @@ class ComputationPolicyImpl(ComputationPolicyInterface):
                     this.store_hidden(i, j, k - 1)
                     this.load_hidden(i, j, k + 1)
                     this.compute_layer(i, j, k)
-                    this.store_cache(i, j, k - 1)
+                    this.store_cache(i, j, k - 1, overlap=False)
                     this.sync()
             timers("generate").stop()
 

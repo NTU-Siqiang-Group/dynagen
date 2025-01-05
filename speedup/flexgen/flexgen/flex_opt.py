@@ -336,8 +336,12 @@ class SelfAttention:
         weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
-        # TODO: global BLS?
+        global BLS
         w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight_home.val
+        tensors = [w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln]
+        cpu_tensors = [(i, t) for i, t in enumerate(tensors) if t.device.device_type == DeviceType.CPU]
+        if cpu_tensors:
+            min_idx, min_tensor = min(cpu_tensors, key=lambda x: x[1].bytes)
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
@@ -355,6 +359,9 @@ class SelfAttention:
                     b_ln.smart_copy(dst2),
                 )
             )
+            if cpu_tensors and BLS > 0:
+                weight_home.val[min_idx] = weight_read_buf.val[min_idx][0]
+                BLS -= 4
 
     def init_cache_one_gpu_batch(self, cache_home):
         if self.policy.cache_gpu_percent == 100:
@@ -372,7 +379,7 @@ class SelfAttention:
 
         cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
         cache_home.store(cache)
-    
+
     def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
         if i == 0:  # prefill, no cache
             return
@@ -560,7 +567,9 @@ class SelfAttention:
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, cpu_delegation=None):
+    def forward(
+        self, hidden, cache_read_buf, weight_read_buf, attention_mask, cache_write_buf, i, k, cpu_delegation=None
+    ):
         n_head = self.config.n_head
         if not cpu_delegation is None:
             attention_compute = self.env.cpu if cpu_delegation else self.env.gpu
@@ -711,10 +720,10 @@ class MLP:
 
     def load_cache(self, cache_home, cache_read_buf, i):
         pass  # do nothing
-    
+
     def load_cache_dyn(self, cache_home, cache_read_buf, i, load_to_cpu=False):
         pass
-    
+
     def store_cache(self, cache_home, cache_write_buf, i):
         pass  # do nothing
 
@@ -878,13 +887,13 @@ class OptLM:
             self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
 
     def pop_weight(self, i, j, k):
-      if j == self.num_layers:
+        if j == self.num_layers:
             j = 0
             i += 1
             if i == self.execute_gen_len:
                 return
-      self.layers[j].pop_weight(self.weight_read_buf[j])
-      
+        self.layers[j].pop_weight(self.weight_read_buf[j])
+
     def delete_weight(self, j, k):
         if k == 0:
             for x in self.weight_home[j].pop():
@@ -916,7 +925,7 @@ class OptLM:
                 self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
         else:
             self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
-    
+
     def load_cache_dyn(self, i, j, k, load_to_cpu=False):
         if not self.layers[j % self.num_layers].need_cache:
             return
@@ -1056,11 +1065,11 @@ class OptLM:
 
     def init_all_weights(self):
         self.weight_home = array_1d(self.num_layers, ValueHolder)
-        for j in range(self.num_layers):
+        for j in tqdm(range(self.num_layers)):
             self.init_weight(j)
 
     def delete_all_weights(self):
-        for j in tqdm(range(self.num_layers)):
+        for j in range(self.num_layers):
             self.delete_weight(j, 0)
 
     def update_attention_mask(self, i, k):
@@ -1266,7 +1275,9 @@ def run_flexgen(args):
     gpu = TorchDevice("cuda:0")
     cpu = TorchDevice("cpu")
     disk = TorchDisk(args.offload_dir)
-    env = ExecutionEnv(gpu=gpu, cpu=cpu, disk=disk, mixed=get_torch_mixed_device_mem_manager("default", [gpu, cpu, disk]))
+    env = ExecutionEnv(
+        gpu=gpu, cpu=cpu, disk=disk, mixed=get_torch_mixed_device_mem_manager("default", [gpu, cpu, disk])
+    )
 
     policy = Policy(
         args.gpu_batch_size,

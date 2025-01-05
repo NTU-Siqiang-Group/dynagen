@@ -124,10 +124,12 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                 wait_stream_finish(layers_cache_sync[k][j])
             layers_cache_sync[k][j] = None
             cpu_del = k % 2 == 0
+            # this.load_weight(i, j + 1, k)
+            # this.load_cache(i, j, k + 1)
             this.store_hidden(i, j, k - 1)
             this.load_hidden(i, j, k + 1)
-            this.compute_layer(i, j, k, cpu_delegation=cpu_del)
-            this.store_cache(i, j, k - 1)
+            this.compute_layer(i, j, k, cpu_delegation=0)
+            this.store_cache(i, j, k - 1, overlap=False)
 
         # optimizer = DynagenOptWorksetHeuristic(this.num_layers, this.policy.gpu_batch_size, this.num_gpu_batches, 1024, this.execute_gen_len, 23, Llama13BConfig())
         # optimizer.optimize()

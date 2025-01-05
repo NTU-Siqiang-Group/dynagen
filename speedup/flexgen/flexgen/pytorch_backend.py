@@ -433,13 +433,13 @@ class TorchDevice:
             w_v = w_v.device.decompress(w_v)
             w_out = w_out.device.decompress(w_out)
 
+        b, tgt_s, h = inputs.shape
         if isinstance(attention_mask, tuple):
             attention_mask_cpu, attention_mask_gpu = attention_mask
             src_s = attention_mask_cpu.shape[1]
         else:
+            attention_mask_cpu = attention_mask_gpu = attention_mask
             src_s = attention_mask.shape[1]
-
-        b, tgt_s, h = inputs.shape
         head_dim = h // n_head
         scaling = head_dim**-0.5
 
