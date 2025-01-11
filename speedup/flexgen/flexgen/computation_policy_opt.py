@@ -67,15 +67,15 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             if this.layers[j].need_cache:
                 wait_stream_finish(layers_cache_sync[j])
             layers_cache_sync[j] = None
-            cpu_del = j % 4 == 0
+            cpu_del = j % 2 == 1
             # this.load_weight(i, j + 1, 0)
             # this.load_cache(i,j+1,0)
             this.load_hidden(i, j, 0)
-            this.compute_layer(i, j, 0, cpu_delegation=False)
+            this.compute_layer(i, j, 0, cpu_delegation=1)
             if j == this.num_layers - 1:
                 this.sync()
             this.store_cache(i, j - 1, 0)
-            this.store_hidden(i, j - 1, 0)
+            this.store_hidden(i, j, 0)
 
         layers_weights_sync = [None for _ in range(this.num_layers)]
         layers_cache_sync = [None for _ in range(this.num_layers)]
@@ -97,11 +97,11 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                         token = i + 1
                     if token >= this.execute_gen_len:
                         continue
-                    if layers_weights_sync[layer] is None and loading_weights <= 4:
+                    if layers_weights_sync[layer] is None and loading_weights <= 1:
                         f = this.cache_loader.load_cache(True, load_layer_weight, token, layer)
                         layers_weights_sync[layer] = f
-                    if layers_cache_sync[layer] is None and loading_caches <= 4:
-                        f = this.cache_loader.load_cache(True, load_layer_cache, token, layer, 0, False)
+                    if layers_cache_sync[layer] is None and loading_caches <= 1:
+                        f = this.cache_loader.load_cache(True, load_layer_cache, token, layer, 0, 1)
                         layers_cache_sync[layer] = f
 
                 compute_layer(i, j, layers_weights_sync, layers_cache_sync)
@@ -117,18 +117,15 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
         def load_layer_cache(i, j, k, load_to_cpu=False):
             this.load_cache_dyn(i, j, k, load_to_cpu=load_to_cpu)
 
-        def compute_layer(i, j, k, layers_weights_sync, layers_cache_sync):
+        def compute_layer(i, j, k, layers_weights_sync, layers_cache_sync, cpu_del):
             wait_stream_finish(layers_weights_sync[k][j])
             layers_weights_sync[k][j] = None
             if this.layers[j].need_cache:
                 wait_stream_finish(layers_cache_sync[k][j])
             layers_cache_sync[k][j] = None
-            cpu_del = k % 2 == 0
-            # this.load_weight(i, j + 1, k)
-            # this.load_cache(i, j, k + 1)
             this.store_hidden(i, j, k - 1)
             this.load_hidden(i, j, k + 1)
-            this.compute_layer(i, j, k, cpu_delegation=0)
+            this.compute_layer(i, j, k, cpu_delegation=cpu_del[(i, j, k)])
             this.store_cache(i, j, k - 1, overlap=False)
 
         # optimizer = DynagenOptWorksetHeuristic(this.num_layers, this.policy.gpu_batch_size, this.num_gpu_batches, 1024, this.execute_gen_len, 23, Llama13BConfig())
@@ -165,8 +162,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                     if (i, j, k) in weight_prefetch:
                         weight_prefetches = weight_prefetch[(i, j, k)]
                     for token, layer, batch in cache_prefetches:
-                        cpu_del = cpu_delegation[(token, layer, batch)]
-                        f = this.cache_loader.load_cache(True, load_layer_cache, token, layer, batch, cpu_del)
+                        f = this.cache_loader.load_cache(True, load_layer_cache, token, layer, batch, cpu_delegation[(token, layer, batch)])
                         layers_cache_sync[batch][layer] = f
                     for token, layer, batch in weight_prefetches:
                         f = this.cache_loader.load_cache(True, load_layer_weight, token, layer, batch)
@@ -178,6 +174,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                         k,
                         layers_weights_sync,
                         layers_cache_sync,
+                        cpu_delegation
                     )
 
                     if i == 0:
