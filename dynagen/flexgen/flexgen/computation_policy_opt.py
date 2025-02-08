@@ -118,7 +118,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
         def compute_layer(i, j, k, layers_weights_sync, layers_cache_sync, cpu_del):
             wait_stream_finish(layers_weights_sync[k][j])
             layers_weights_sync[k][j] = None
-            if this.layers[j].need_cache:
+            if i != 0 and this.layers[j].need_cache:
                 wait_stream_finish(layers_cache_sync[k][j])
             layers_cache_sync[k][j] = None
             this.store_hidden(i, j, k - 1)
@@ -135,7 +135,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
           this.gpu_memory_capacity,
           Llama13BConfig()
         )
-        optimizer.optimize_policy(weight_percent=int(this.policy.w_gpu_percent), cache_percent=int(this.policy.cache_gpu_percent))
+        optimizer.optimize()
         cache_prefetch, weight_prefetch, cpu_delegation = optimizer.get_policy()
 
         layers_weights_sync = [[None for _ in range(this.num_layers)] for _ in range(this.num_gpu_batches)]

@@ -22,7 +22,6 @@ def summarize_policy(gen_len, num_layers, num_batches, opt):
 
 if __name__ == "__main__":
     llama_config = Llama13BConfig()
-    opt = DynagenOptWorksetHeuristic(len(llama_config.get_weights()), 8, 8, 1024, 64, 24, llama_config)
-    opt.optimize()
-    # summarize_policy(32, len(llama_config.get_weights()), 16, opt)
-    print(opt.get_policy())
+    opt = DynagenOptWorksetHeuristic(len(llama_config.get_weights()), 8, 8, 1024, 64, 20, llama_config)
+    wg, cg = opt.optimize()
+    print(f"Optimized weight_gpu_percent: {wg}, cache_gpu_percent: {cg}")

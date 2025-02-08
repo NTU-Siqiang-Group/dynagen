@@ -84,7 +84,7 @@ class DynagenOptWorksetHeuristic:
                     min_cost = cost
                     self.cache_prefetch, self.weight_prefetch, self.cpu_del = policy
                 else:
-                    break
+                    return weight_percent, cache_percent
             except:
                 continue
 
@@ -106,8 +106,8 @@ class DynagenOptWorksetHeuristic:
         cache_prefetch = np.zeros(self.n + 1, np.int64)
         cpu_del = np.zeros(self.n + 1, np.int32)
 
-        mem_consumption = np.sum(self.weight_sizes, dtype=np.uint64) * weight_percent // 100 + self.weight_sizes[0]
-        mem_consumption += self.profiler.get_cache_size(self.batch_size, self.prompt_len + self.gen_len) * cache_percent // 100
+        mem_consumption = np.sum(self.weight_sizes[1:], dtype=np.uint64) * weight_percent // 100 + self.weight_sizes[0]
+        mem_consumption += self.profiler.get_cache_size(self.num_gpu_batches * self.batch_size, self.prompt_len + self.gen_len) * self.profiler.num_hidden_layers * cache_percent // 100
         mem_consumption = int(mem_consumption)
         remaining_sizes = QOBTree()
 

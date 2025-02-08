@@ -26,6 +26,8 @@ class ProfilerConfig:
 
 class Llama1BConfig(ProfilerConfig):
     def get_weights(self):
+        self.num_hidden_layers = 16
+
         # attention_w_k_size = 2097152
         # attention_w_v_size = 2097152
         # attention_w_q_size = 8388608
@@ -49,7 +51,7 @@ class Llama1BConfig(ProfilerConfig):
         self.mlp_size = mlp_w_ln_size + mlp_w_g_size + mlp_w_u_size + mlp_w_d_size
 
         weights = [input_size]
-        for _ in range(16):
+        for _ in range(self.num_hidden_layers):
             weights.append(self.attention_size)
             weights.append(self.mlp_size)
         weights.append(output_size)
@@ -77,7 +79,7 @@ class Llama13BConfig(ProfilerConfig):
         hidden_size = 5120
         intermediate_size = 13824
         vocab_size = 32000
-        num_hidden_layers = 40
+        self.num_hidden_layers = 40
         dtype_bytes = 2  # float16每个参数2字节
 
         # Embedding
@@ -105,7 +107,7 @@ class Llama13BConfig(ProfilerConfig):
         output_size = output_w_ln_size + output_w_token_size
 
         weights = [input_w_token_size]
-        for _ in range(num_hidden_layers):
+        for _ in range(self.num_hidden_layers):
             weights.append(self.attention_size)
             weights.append(self.mlp_size)
         weights.append(output_size)
@@ -146,7 +148,7 @@ class Opt13BConfig(ProfilerConfig):
         hidden_size = 5120
         intermediate_size = 13824
         vocab_size = 32000
-        num_hidden_layers = 40
+        self.num_hidden_layers = 40
         dtype_bytes = 2
 
         input_w_token_size = vocab_size * hidden_size * dtype_bytes
@@ -172,7 +174,7 @@ class Opt13BConfig(ProfilerConfig):
         output_size = output_w_ln_size + output_w_token_size
 
         weights = [input_w_token_size]
-        for _ in range(num_hidden_layers):
+        for _ in range(self.num_hidden_layers):
             weights.append(self.attention_size)
             weights.append(self.mlp_size)
         weights.append(output_size)
