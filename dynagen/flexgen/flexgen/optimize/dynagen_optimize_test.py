@@ -1,4 +1,4 @@
-from dynagen_optimize import DynagenOpt, DynagenOptBruteforce, DynagenOptWorksetHeuristic
+from dynagen_optimize import DynagenOptWorksetHeuristic
 from network_config import Llama1BConfig, Llama13BConfig
 
 def summarize_policy(gen_len, num_layers, num_batches, opt):
@@ -22,9 +22,7 @@ def summarize_policy(gen_len, num_layers, num_batches, opt):
 
 if __name__ == "__main__":
     llama_config = Llama13BConfig()
-    opt = DynagenOpt(len(llama_config.get_weights()), 1, 1, 512, 1, 10, 7, 7, llama_config)
-    # opt = DynagenOptBruteforce(len(llama_config.get_weights()), 8, 8, 512, 1, 24, llama_config)
-    # opt = DynagenOptWorksetHeuristic(len(llama_config.get_weights()), 8, 8, 2048, 128, 24, llama_config)
+    opt = DynagenOptWorksetHeuristic(len(llama_config.get_weights()), 8, 8, 1024, 64, 24, llama_config)
     opt.optimize()
     # summarize_policy(32, len(llama_config.get_weights()), 16, opt)
     print(opt.get_policy())

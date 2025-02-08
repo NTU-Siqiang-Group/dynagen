@@ -808,7 +808,7 @@ class OptLM:
         self.cpu_delegation_percent = args.cpu_del_percent
         self.num_prefetch_weight_layers = args.num_prefetch_weight_layers
         self.num_prefetch_cache_batches = args.num_prefetch_cache_batches
-        # self.gpu_memory_capacity = args.gpu_mem
+        self.gpu_memory_capacity = args.gpu_mem
 
         layers = []
         layers.append(InputEmbed(self.config, self.env, self.policy))
@@ -1438,7 +1438,7 @@ def add_parser_arguments(parser):
                         help="Number of prefetched weight layers (required if --computation-policy is 'optimize').")
     parser.add_argument("--num-prefetch-cache-batches", type=int, default=None,
                         help="Number of prefetched cache batches (required if --computation-policy is 'optimize').")
-    # parser.add_argument("--gpu-mem", type=float, default=None, help="GPU memory capacity in GiB.")
+    parser.add_argument("--gpu-mem", type=float, default=None, help="GPU memory capacity in GiB.")
 
 
 if __name__ == "__main__":

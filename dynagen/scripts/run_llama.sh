@@ -6,5 +6,5 @@ MODEL="meta-llama/Llama-2-13b-hf"
 # for MODEL in "facebook/opt-6.7B"
 CMD="--model $MODEL"
 CMD=$CMD" --percent 20 80 0 100 100 0"
-CMD=$CMD" --gpu-batch-size 16 --num-gpu-batches 1 --prompt-len 2048 --gen-len 16 --computation-policy optimize --cpu-cache-compute" 
+CMD=$CMD" --gpu-batch-size 16 --num-gpu-batches 1 --prompt-len 2048 --gen-len 16 --computation-policy optimize --cpu-cache-compute --gpu-mem 24" 
 python -m flexgen.flex_llama $CMD

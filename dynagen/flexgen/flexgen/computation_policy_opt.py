@@ -1,11 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
+
+import torch
+from tqdm import tqdm
+
 from flexgen.computation_policy_interface import *
+from flexgen.optimize.dynagen_optimize import DynagenOptWorksetHeuristic
 from flexgen.optimize.network_config import Llama13BConfig
 from flexgen.timer import timers
-from tqdm import tqdm
-import numpy as np
-import torch
-from concurrent.futures import ThreadPoolExecutor
-from flexgen.optimize.dynagen_optimize import DynagenOpt, DynagenOptWorksetHeuristic
 
 
 class MultiStreamBase:
@@ -67,11 +68,8 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             if this.layers[j].need_cache:
                 wait_stream_finish(layers_cache_sync[j])
             layers_cache_sync[j] = None
-            cpu_del = j % 2 == 1
-            # this.load_weight(i, j + 1, 0)
-            # this.load_cache(i,j+1,0)
             this.load_hidden(i, j, 0)
-            this.compute_layer(i, j, 0, cpu_delegation=1)
+            this.compute_layer(i, j, 0, cpu_delegation=0)
             if j == this.num_layers - 1:
                 this.sync()
             this.store_cache(i, j - 1, 0)
@@ -128,27 +126,16 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.compute_layer(i, j, k, cpu_delegation=cpu_del[(i, j, k)])
             this.store_cache(i, j, k - 1, overlap=False)
 
-        # optimizer = DynagenOptWorksetHeuristic(
-        #   this.num_layers,
-        #   this.policy.gpu_batch_size,
-        #   this.num_gpu_batches,
-        #   this.prompt_len,
-        #   this.execute_gen_len,
-        #   this.gpu_memory_capacity,
-        #   Llama13BConfig()
-        # )
-        optimizer = DynagenOpt(
-            this.num_layers,
-            this.policy.gpu_batch_size,
-            this.num_gpu_batches,
-            this.prompt_len,
-            this.execute_gen_len,
-            this.cpu_delegation_percent,
-            this.num_prefetch_weight_layers,
-            this.num_prefetch_cache_batches,
-            Llama13BConfig(),
+        optimizer = DynagenOptWorksetHeuristic(
+          this.num_layers,
+          this.policy.gpu_batch_size,
+          this.num_gpu_batches,
+          this.prompt_len,
+          this.execute_gen_len,
+          this.gpu_memory_capacity,
+          Llama13BConfig()
         )
-        optimizer.optimize()
+        optimizer.optimize_policy(weight_percent=int(this.policy.w_gpu_percent), cache_percent=int(this.policy.cache_gpu_percent))
         cache_prefetch, weight_prefetch, cpu_delegation = optimizer.get_policy()
 
         layers_weights_sync = [[None for _ in range(this.num_layers)] for _ in range(this.num_gpu_batches)]
