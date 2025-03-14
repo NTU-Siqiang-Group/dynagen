@@ -1,11 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
 import torch
 from tqdm import tqdm
 
 from flexgen.computation_policy_interface import *
 from flexgen.optimize.dynagen_optimize import DynagenOptWorksetHeuristic
-from flexgen.optimize.network_config import Llama13BConfig
+from flexgen.optimize.network_config import ProfilerConfig, Llama13BConfig
 from flexgen.timer import timers
 
 
@@ -178,3 +179,210 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                         this.sync()
 
             timers("generate").stop()
+
+    def generation_loop_debug_multi_batch(self, this):
+        def is_attn_layer(j):
+            return j % 2 == 1 and j != this.num_layers - 1
+
+        def is_mlp_layer(j):
+            return j % 2 == 0 and j != 0
+
+        def is_valid_step(i, j, k):
+            if k >= this.num_gpu_batches:
+                k = k % this.num_gpu_batches
+                j += 1
+            elif k < 0:
+                k = this.num_gpu_batches - (-k % this.num_gpu_batches)
+                j -= 1
+            if j >= this.num_layers:
+                j = j % this.num_layers
+                i += 1
+            elif j < 0:
+                j = this.num_layers - (-j % this.num_layers)
+                i -= 1
+            return i >= 0 and i < this.execute_gen_len
+
+        timers("load_weight").reset()
+        timers("load_cache").reset()
+        timers("store_cache").reset()
+        timers("load_hidden").reset()
+        timers("store_hidden").reset()
+        timers("compute_cache_gpu").reset()
+        timers("compute_cache_cpu").reset()
+        timers("compute_mlp").reset()
+
+        load_weight_steps = set()
+        load_cache_steps = set()
+        store_cache_steps = set()
+
+        load_weight_start = torch.cuda.Event(enable_timing=True)
+        load_weight_end = torch.cuda.Event(enable_timing=True)
+        load_cache_start = torch.cuda.Event(enable_timing=True)
+        load_cache_end = torch.cuda.Event(enable_timing=True)
+        store_hidden_start = torch.cuda.Event(enable_timing=True)
+        store_hidden_end = torch.cuda.Event(enable_timing=True)
+        load_hidden_start = torch.cuda.Event(enable_timing=True)
+        load_hidden_end = torch.cuda.Event(enable_timing=True)
+        compute_start = torch.cuda.Event(enable_timing=True)
+        compute_end = torch.cuda.Event(enable_timing=True)
+        store_cache_start = torch.cuda.Event(enable_timing=True)
+        store_cache_end = torch.cuda.Event(enable_timing=True)
+
+        n = this.execute_gen_len * this.num_layers * this.num_gpu_batches
+        pbar = tqdm(total=n)
+        timers("prefill").reset()
+        timers("decoding_gpu_batch").reset()
+
+        # Prologue
+        for k in range(this.num_gpu_batches):
+            this.load_weight(0, 0, k)
+        this.load_hidden(0, 0, 0)
+        this.sync()
+
+        # Generate
+        c = 1
+        for i in range(this.execute_gen_len):
+            if i == 0:
+                timers("prefill").start()
+
+            for k in range(this.num_gpu_batches):
+                this.update_attention_mask(i, k)
+            for j in range(this.num_layers):
+                is_attn, is_mlp = is_attn_layer(j), is_mlp_layer(j)
+                if i > 0:
+                    timers("decoding_gpu_batch").start()
+                for k in range(this.num_gpu_batches):
+                    cpu_del = k % 2 == 0
+
+                    load_weight_start.record(stream=this.load_weight_stream)
+                    this.load_weight(i, j + 1, k)
+                    load_weight_end.record(stream=this.load_weight_stream)
+
+                    load_cache_start.record(stream=this.load_cache_stream)
+                    this.load_cache_dyn(i, j, k + 1, load_to_cpu=cpu_del, overlap=True)
+                    load_cache_end.record(stream=this.load_cache_stream)
+
+                    store_hidden_start.record()
+                    this.store_hidden(i, j, k - 1)
+                    store_hidden_end.record()
+
+                    load_hidden_start.record()
+                    this.load_hidden(i, j, k + 1)
+                    load_hidden_end.record()
+
+                    compute_start.record()
+                    this.compute_layer(i, j, k, cpu_del)
+                    compute_end.record()
+
+                    store_cache_start.record(stream=this.store_cache_stream)
+                    this.store_cache(i, j, k - 1)
+                    store_cache_end.record(stream=this.store_cache_stream)
+
+                    this.sync()
+
+                    if is_valid_step(i, j + 1, k):
+                        load_weight_steps.add(c)
+                        timers("load_weight").costs.append(
+                            load_weight_start.elapsed_time(load_weight_end) / 1000
+                        )
+
+                    if is_valid_step(i, j, k + 1) and i != 0 and is_attn and not cpu_del:
+                        load_cache_steps.add(c)
+                        timers("load_cache").costs.append(
+                            load_cache_start.elapsed_time(load_cache_end) / 1000
+                        )
+
+                    if is_valid_step(i, j, k - 1):
+                        timers("store_hidden").costs.append(
+                            store_hidden_start.elapsed_time(store_hidden_end) / 1000
+                        )
+
+                    if is_valid_step(i, j, k + 1):
+                        timers("load_hidden").costs.append(
+                            load_hidden_start.elapsed_time(load_hidden_end) / 1000
+                        )
+
+                    if is_attn:
+                        if cpu_del:
+                            timers("compute_cache_cpu").costs.append(
+                                compute_start.elapsed_time(compute_end) / 1000
+                            )
+                        else:
+                            timers("compute_cache_gpu").costs.append(
+                                compute_start.elapsed_time(compute_end) / 1000
+                            )
+                    elif is_mlp:
+                        timers("compute_mlp").costs.append(
+                            compute_start.elapsed_time(compute_end) / 1000
+                        )
+
+                    if is_valid_step(i, j, k - 1) and i < this.execute_gen_len - 1 and is_attn:
+                        store_cache_steps.add(c)
+                        timers("store_cache").costs.append(
+                            store_cache_start.elapsed_time(store_cache_end) / 1000
+                        )
+
+                    pbar.update(1)
+                    c += 1
+                if i > 0:
+                    timers("decoding_gpu_batch").stop()
+            if i == 0:
+                timers("prefill").stop()
+
+        # Convert "decoding_gpu_batch" timer to "generate" timer
+        batch_cost = np.mean(timers("decoding_gpu_batch").costs[10:])
+        for i in range(this.execute_gen_len):
+            if i == 0:
+                timers("generate").costs.append(timers("prefill").costs[0])
+            else:
+                timers("generate").costs.append(this.num_layers * batch_cost)
+
+        # Compute average cost for each step
+        profiler = Llama13BConfig()
+        weight_sizes = profiler.get_weights()
+
+        def get_compute_weight_size(c, weight_gpu_percent):
+            if c > n:
+                return 0
+            j = ((c - 1) % (this.num_layers * this.num_gpu_batches)) // this.num_gpu_batches
+            return weight_sizes[j] * (100 - weight_gpu_percent) // 100
+
+        def get_compute_cache_size(c, cache_gpu_percent):
+            i = (c - 1) // (this.num_layers * this.num_gpu_batches)
+            return profiler.get_cache_size(this.policy.gpu_batch_size, this.prompt_len + i) * (100 - cache_gpu_percent) // 100
+
+        timers("htod").reset()
+        timers("dtoh").reset()
+        w = lc = sc = k = 0
+        for cur_idx in range(1, n + 1):
+            if cur_idx in load_weight_steps:
+                timers("htod").costs.append(
+                    timers("load_weight").costs[w] / get_compute_weight_size(cur_idx + this.num_gpu_batches, this.policy.w_gpu_percent)
+                )
+                w += 1
+            if cur_idx in load_cache_steps:
+                timers("htod").costs.append(
+                    timers("load_cache").costs[lc] / get_compute_cache_size(cur_idx + 1, this.policy.cache_gpu_percent)
+                )
+                lc += 1
+            if cur_idx in store_cache_steps:
+                if k % 2 == 0:
+                    timers("dtoh").costs.append(
+                        timers("store_cache").costs[sc] / profiler.get_cache_size(this.policy.gpu_batch_size, 1)
+                    )
+                else:
+                    timers("dtoh").costs.append(
+                        timers("store_cache").costs[sc] / get_compute_cache_size(cur_idx - 1, this.policy.cache_gpu_percent)
+                    )
+                sc += 1
+            k += 1
+            if k >= this.num_gpu_batches:
+                k = 0
+
+        ProfilerConfig.htod_cost = timers("htod").elapsed()
+        ProfilerConfig.dtoh_cost = timers("dtoh").elapsed()
+        ProfilerConfig.compute_cache_gpu = timers("compute_cache_gpu").elapsed()
+        ProfilerConfig.compute_cache_cpu = timers("compute_cache_cpu").elapsed()
+        ProfilerConfig.compute_mlp_gpu = timers("compute_mlp").elapsed()
+
+        # TODO: load_hidden and store_hidden

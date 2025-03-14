@@ -299,7 +299,7 @@ class SelfAttention:
         self.policy = policy
         self.compute = self.env.gpu
         self.weight_load_dst = self.compute.compressed_device if policy.compress_weight else self.compute
-        self.attention_compute = self.env.cpu if self.policy.cpu_cache_compute else self.env.gpu
+        self.attention_compute = self.env.cpu if policy.cpu_cache_compute else self.env.gpu
 
         self.task = None
         self.need_cache = True
@@ -795,10 +795,11 @@ class TransformerLayer:
 
 
 class OptLM:
-    def __init__(self, config: Union[str, OptConfig], env: ExecutionEnv, path: str, policy: Policy):
+    def __init__(self, config: Union[str, OptConfig], env: ExecutionEnv, path: str, policy: Policy, args=None):
         if isinstance(config, str):
             config = get_opt_config(config)
-        args = parser.parse_args()
+        if args is None:
+            args = parser.parse_args()
         self.config = config
         self.env = env
         self.path = path
@@ -835,11 +836,11 @@ class OptLM:
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
-        if parser.parse_args().computation_policy == "stream":
+        if args.computation_policy == "stream":
             self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
         elif (
-            parser.parse_args().computation_policy == "alter_stream"
-            or parser.parse_args().computation_policy == "optimize"
+            args.computation_policy == "alter_stream"
+            or args.computation_policy == "optimize"
         ):
             self.stream_manager = ComputationStreamAlterManager(32)
             self.cache_loader = CacheLoaderManager(32)
@@ -931,9 +932,7 @@ class OptLM:
         else:
             self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
 
-    def load_cache_dyn(self, i, j, k, load_to_cpu=False):
-        if not self.layers[j % self.num_layers].need_cache:
-            return
+    def load_cache_dyn(self, i, j, k, load_to_cpu=False, overlap=False):
         if k == self.num_gpu_batches:
             k = 0
             j += 1
@@ -942,9 +941,15 @@ class OptLM:
             i += 1
             if i == self.execute_gen_len:
                 return
-        if i == 0:  # prefill, no cache
+
+        if not self.layers[j].need_cache or i == 0:
             return
-        self.layers[j].load_cache_dyn(self.cache_home[j][k], self.cache_read_buf[j][k], i, load_to_cpu)
+
+        if not overlap:
+            self.layers[j].load_cache_dyn(self.cache_home[j][k], self.cache_read_buf[j][k], i, load_to_cpu)
+        else:
+            with torch.cuda.stream(self.load_cache_stream):
+                self.layers[j].load_cache_dyn(self.cache_home[j][k], self.cache_read_buf[j][k], i, load_to_cpu)
 
     def store_cache(self, i, j, k, overlap=True):
         # Handle corner cases
@@ -1315,11 +1320,15 @@ def run_flexgen(args):
     )
 
     print("init weight...")
-    model = OptLM(opt_config, env, args.path, policy)
+    model = OptLM(opt_config, env, args.path, policy, args)
 
     try:
         print("warmup - generate")
-        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
+        model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
+
+        if args.computation_policy == "optimize" and args.num_gpu_batches > 1:
+            print("profiling - generate")
+            model.generate(warmup_inputs, max_new_tokens=2, debug_mode="fewer_batch", verbose=args.verbose)
 
         print("benchmark - generate")
         timers("generate").reset()

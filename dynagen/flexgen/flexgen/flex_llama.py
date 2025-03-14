@@ -349,10 +349,11 @@ class LlamaTransformerLayer(TransformerLayer):
 
 
 class LlamaLM(OptLM):
-    def __init__(self, config: Union[str, LlamaConfig], env: ExecutionEnv, path: str, policy: Policy):
+    def __init__(self, config: Union[str, LlamaConfig], env: ExecutionEnv, path: str, policy: Policy, args=None):
         if isinstance(config, str):
             config = get_llama_config(config)
-        args = parser.parse_args()
+        if args is None:
+            args = parser.parse_args()
         self.config = config
         self.env = env
         self.path = path
@@ -399,11 +400,11 @@ class LlamaLM(OptLM):
         self.load_weight_stream = torch.cuda.Stream()
         self.load_cache_stream = torch.cuda.Stream()
         self.store_cache_stream = torch.cuda.Stream()
-        if parser.parse_args().computation_policy == "stream":
+        if args.computation_policy == "stream":
             self.stream_manager = ComputationStreams(self.policy.num_gpu_batches)
         elif (
-            parser.parse_args().computation_policy == "alter_stream"
-            or parser.parse_args().computation_policy == "optimize"
+            args.computation_policy == "alter_stream"
+            or args.computation_policy == "optimize"
         ):
             self.stream_manager = ComputationStreamAlterManager(32)
             self.cache_loader = CacheLoaderManager(32)
@@ -499,11 +500,15 @@ def run_flexgen(args):
     )
 
     print("init weight...")
-    model = LlamaLM(llama_config, env, args.path, policy)
+    model = LlamaLM(llama_config, env, args.path, policy, args)
 
     try:
         print("warmup - generate")
-        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
+        model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
+
+        if args.computation_policy == "optimize" and args.num_gpu_batches > 1:
+            print("profiling - generate")
+            model.generate(warmup_inputs, max_new_tokens=2, debug_mode="fewer_batch", verbose=args.verbose)    
 
         print("benchmark - generate")
         timers("generate").reset()

@@ -230,13 +230,13 @@ class DynagenOptWorksetHeuristic:
 
             cpu_del = cpu_delegation[cur_idx]
             if cpu_del:
-                # 1. TODO: the cache is current stored in CPU, no htod cost is required
+                # 1. the cache is current stored in CPU, no htod cost is required
                 # 2. the new k v should be transfered back to CPU (dtoh)
                 io_costs[cur_idx] += self.profiler.get_dtoh_cost(
                     self.profiler.get_cache_size(self.batch_size, 1)
                 )
             else:
-                # 1. TODO: the cache is stored in CPU, htod cost is required
+                # 1. the cache is stored in CPU, htod cost is required
                 # 2. the new k v is not required to transfer to CPU. But the whole KV cache should be transfered to CPU after computation
                 cache_prefetch_idx = cache_prefetch[cur_idx]
                 if io_costs[cache_prefetch_idx] == 0:

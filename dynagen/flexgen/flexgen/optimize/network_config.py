@@ -1,4 +1,10 @@
 class ProfilerConfig:
+    htod_cost = 2e-11
+    dtoh_cost = 2e-11
+    compute_cache_gpu = 5e-3
+    compute_cache_cpu = 6e-3
+    compute_mlp_gpu = 1e-4
+
     def get_cache_size(self, batch_size, seq_len):
         raise NotImplementedError()
 
@@ -9,19 +15,19 @@ class ProfilerConfig:
         raise NotImplementedError()
 
     def get_htod_cost(self, size):
-        return size * 2e-11
+        return size * self.htod_cost
 
     def get_dtoh_cost(self, size):
-        return size * 2e-11
+        return size * self.dtoh_cost
 
     def get_compute_cache_gpu(self):
-        return 5e-3
+        return self.compute_cache_gpu
 
     def get_compute_cache_cpu(self):
-        return 6e-3
+        return self.compute_cache_cpu
 
     def get_compute_mlp_gpu(self):
-        return 1e-4
+        return self.compute_mlp_gpu
 
 
 class Llama1BConfig(ProfilerConfig):

@@ -1,5 +1,5 @@
 from dynagen_optimize import DynagenOptWorksetHeuristic
-from network_config import Llama1BConfig, Llama13BConfig
+from network_config import Opt13BConfig, Llama13BConfig
 
 def summarize_policy(gen_len, num_layers, num_batches, opt):
     cache, weight, cpu_del = opt.get_policy()

@@ -110,8 +110,7 @@ class TorchTensor:
         return cls(data.shape, data.dtype, data, device, name=name)
 
     def delete(self):
-        assert self.device is not None, "already deleted"
-        if self.device.device_type == DeviceType.DISK:
+        if self.device and self.device.device_type == DeviceType.DISK:
             self.device.delete(self)
         self.device = self.data = None
 
