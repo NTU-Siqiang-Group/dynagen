@@ -1,27 +1,24 @@
 """Implement tensor computations with pytorch."""
 
-from enum import Enum, auto
-from functools import partial
-from itertools import count
 import os
 import queue
 import shutil
-import time
 import threading
-from typing import Optional, Union, Tuple
+from enum import Enum, auto
+from itertools import count
+from typing import Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
 
 from flexgen.utils import (
     GB,
-    T,
     cpu_mem_stats,
-    vector_gather,
     np_dtype_to_torch_dtype,
     torch_dtype_to_np_dtype,
     torch_dtype_to_num_bytes,
+    vector_gather,
 )
 
 general_copy_compressed = TorchCompressedDevice = None
@@ -113,6 +110,7 @@ class TorchTensor:
         if self.device and self.device.device_type == DeviceType.DISK:
             self.device.delete(self)
         self.device = self.data = None
+        torch.cuda.empty_cache()
 
     def load_from_np(self, np_array):
         if self.device.device_type == DeviceType.DISK:
@@ -230,6 +228,7 @@ class TorchDevice:
 
     def del_attention_compute_workspace(self):
         self.attention_compute_workspace = None
+        torch.cuda.empty_cache()
 
     def gen_attention_mask(self, token_ids, pad_token_id, donate):
         data = token_ids.data.ne(pad_token_id)
