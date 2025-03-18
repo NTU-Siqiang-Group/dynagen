@@ -286,7 +286,7 @@ class OutputEmbed:
             (w_ln, _), (b_ln, _), (w_token, _) = weight_read_buf.val
 
         h = self.compute.opt_output_embed(
-            h, w_ln, b_ln, w_token, donate, self.task.do_sample, self.task.temperature, self.task.evaluate
+            h, w_ln, b_ln, w_token, donate, self.task.do_sample, self.task.temperature
         )
         hidden.val = h
 
@@ -1127,11 +1127,7 @@ class OptLM:
         cut_gen_len: Optional[int] = None,
         verbose: int = 0,
         evaluate: bool = False,
-        profile_dir: str = None,
     ):
-        if evaluate:
-            assert max_new_tokens == 1 and self.num_gpu_batches == 1 and self.policy.gpu_batch_size == 1
-
         task = Task(
             inputs=inputs,
             prompt_len=len(inputs[0]),
@@ -1140,7 +1136,6 @@ class OptLM:
             do_sample=do_sample,
             temperature=temperature,
             stop=stop,
-            evaluate=evaluate,
         )
         num_layers = self.num_layers
         num_gpu_batches = self.num_gpu_batches
@@ -1188,9 +1183,9 @@ class OptLM:
             else:
                 # Overlap I/O and compute
                 if num_gpu_batches == 1:
-                    self.generation_loop_overlap_single_batch(evaluate, profile_dir=profile_dir)
+                    self.generation_loop_overlap_single_batch(evaluate)
                 else:
-                    self.generation_loop_overlap_multi_batch(profile_dir=profile_dir)
+                    self.generation_loop_overlap_multi_batch(evaluate)
         elif debug_mode == "fewer_batch":
             # Run fewer layeres and batches for debugging
             if num_gpu_batches == 1:
@@ -1211,9 +1206,6 @@ class OptLM:
             self.env.cpu.del_attention_compute_workspace()
             self.env.gpu.del_attention_compute_workspace()
 
-        if evaluate:
-            return self.hidden[0][-1][0].val.data.detach().cpu()
-
         return self.output_ids
 
     def generation_loop_normal(self, evaluate):
@@ -1222,11 +1214,11 @@ class OptLM:
     def generation_loop_debug_normal(self):
         self.computation_policy.generation_loop_debug_normal(self)
 
-    def generation_loop_overlap_single_batch(self, evaluate, profile_dir=None):
-        self.computation_policy.generation_loop_overlap_single_batch(self, evaluate, profile_dir)
+    def generation_loop_overlap_single_batch(self, evaluate):
+        self.computation_policy.generation_loop_overlap_single_batch(self, evaluate)
 
-    def generation_loop_overlap_multi_batch(self, profile_dir=None):
-        self.computation_policy.generation_loop_overlap_multi_batch(self, profile_dir)
+    def generation_loop_overlap_multi_batch(self, evaluate):
+        self.computation_policy.generation_loop_overlap_multi_batch(self, evaluate)
 
     def generation_loop_debug_single_batch(self):
         self.computation_policy.generation_loop_debug_single_batch(self)
@@ -1324,11 +1316,11 @@ def run_flexgen(args):
 
     try:
         print("warmup - generate")
-        model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
+        model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose, evaluate=args.evaluate)
 
         if args.computation_policy == "optimize" and args.num_gpu_batches > 1:
             print("profiling - generate")
-            model.generate(warmup_inputs, max_new_tokens=2, debug_mode="fewer_batch", verbose=args.verbose)
+            model.generate(warmup_inputs, max_new_tokens=2, debug_mode="fewer_batch", verbose=args.verbose, evaluate=args.evaluate)
 
         print("benchmark - generate")
         timers("generate").reset()
@@ -1338,7 +1330,7 @@ def run_flexgen(args):
             debug_mode=args.debug_mode,
             cut_gen_len=cut_gen_len,
             verbose=args.verbose,
-            profile_dir=args.profile_dir,
+            evaluate=args.evaluate,
         )
         costs = timers("generate").costs
     finally:
@@ -1448,6 +1440,7 @@ def add_parser_arguments(parser):
     parser.add_argument("--num-prefetch-cache-batches", type=int, default=None,
                         help="Number of prefetched cache batches (required if --computation-policy is 'optimize').")
     parser.add_argument("--gpu-mem", type=float, default=None, help="GPU memory capacity in GiB.")
+    parser.add_argument("--evaluate", action="store_true", default=False)
 
 
 if __name__ == "__main__":

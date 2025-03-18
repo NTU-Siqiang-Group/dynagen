@@ -42,10 +42,10 @@ class ComputationPolicyStream(ComputationPolicyInterface):
   def generation_loop_debug_normal(self, this):
     raise NotImplementedError()
   
-  def generation_loop_overlap_single_batch(self, this, evaluate, profile_dir):
+  def generation_loop_overlap_single_batch(self, this, evaluate):
     raise NotImplementedError()
   
-  def generation_loop_overlap_multi_batch(self, this, profile_dir):
+  def generation_loop_overlap_multi_batch(self, this, evaluate):
     print('start generation loop')
     def compute_layer(i, j, k):
       this.load_cache(i, j, k, overlap=False)

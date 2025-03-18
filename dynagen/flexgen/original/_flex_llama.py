@@ -118,7 +118,6 @@ class LlamaOutputEmbed(OutputEmbed):
             donate,
             do_sample=False,
             temperature=0.5,
-            evaluate=self.task.evaluate,
         )
         hidden.val = h
 

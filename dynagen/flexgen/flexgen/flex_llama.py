@@ -138,7 +138,6 @@ class LlamaOutputEmbed(OutputEmbed):
             donate,
             do_sample=False,
             temperature=0.5,
-            evaluate=self.task.evaluate,
         )
         hidden.val = h
 
@@ -354,6 +353,7 @@ class LlamaLM(OptLM):
             config = get_llama_config(config)
         if args is None:
             args = parser.parse_args()
+        self.model = args.model
         self.config = config
         self.env = env
         self.path = path
@@ -504,11 +504,11 @@ def run_flexgen(args):
 
     try:
         print("warmup - generate")
-        model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
+        model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose, evaluate=args.evaluate)
 
         if args.computation_policy == "optimize" and args.num_gpu_batches > 1:
             print("profiling - generate")
-            model.generate(warmup_inputs, max_new_tokens=2, debug_mode="fewer_batch", verbose=args.verbose)    
+            model.generate(warmup_inputs, max_new_tokens=2, debug_mode="fewer_batch", verbose=args.verbose, evaluate=args.evaluate)    
 
         print("benchmark - generate")
         timers("generate").reset()
@@ -518,7 +518,7 @@ def run_flexgen(args):
             debug_mode=args.debug_mode,
             cut_gen_len=cut_gen_len,
             verbose=args.verbose,
-            profile_dir=args.profile_dir,
+            evaluate=args.evaluate,
         )
         costs = timers("generate").costs
     finally:
@@ -627,6 +627,7 @@ def add_parser_arguments(parser):
     parser.add_argument("--num-prefetch-cache-batches", type=int, default=None,
                         help="Number of prefetched cache batches (required if --computation-policy is 'optimize').")
     parser.add_argument("--gpu-mem", type=float, default=None, help="GPU memory capacity in GiB.")
+    parser.add_argument("--evaluate", action="store_true", default=False)
 
 
 if __name__ == "__main__":

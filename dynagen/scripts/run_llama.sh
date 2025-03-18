@@ -17,5 +17,6 @@ CMD="--model $MODEL"
 CMD=$CMD" --percent ${WG} ${WC} ${CG} ${CC} 100 0"
 CMD=$CMD" --gpu-batch-size ${GBS} --num-gpu-batches ${B} --prompt-len ${PROMPT} --gen-len ${GEN} --computation-policy $policy --cpu-cache-compute --gpu-mem ${VRAM}"
 python -m flexgen.flex_llama $CMD
+MODEL=${MODEL##*/}
 mv "fo-hf-gbs$GBS-ngbs$B-prompt$PROMPT-gen$GEN-percent-$WG-$WC-$CG-$CC-100-0-cpu-cache.log" \
-"fo-hf-gbs$GBS-ngbs$B-prompt$PROMPT-gen$GEN-percent-$WG-$WC-$CG-$CC-100-0-workset-${VRAM}G.log"
+"fo-$MODEL-gbs$GBS-ngbs$B-prompt$PROMPT-gen$GEN-percent-$WG-$WC-$CG-$CC-100-0-workset-${VRAM}G.log"

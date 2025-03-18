@@ -30,8 +30,6 @@ class Task:
     temperature: float
     stop: Optional[int]
 
-    evaluate: bool
-
 
 @dataclasses.dataclass(frozen=True)
 class ExecutionEnv:

@@ -268,9 +268,8 @@ def download_llama_weights(model_name, org_name, path, hf_token):
     with open(param_path, "wb") as f:
         np.save(f, model.lm_head.weight.detach().cpu().numpy())
 
-    for idx, layer in enumerate(model.model.layers):
-        rotary_emb = layer.self_attn.rotary_emb
-        inv_freq_tensor = rotary_emb.inv_freq
+    inv_freq_tensor = model.model.rotary_emb.inv_freq
+    for idx in range(len(model.model.layers)):
         rotary_emb_path = os.path.join(path, f"layers.{idx}.self_attn.rotary_emb.inv_freq")
         with open(rotary_emb_path, "wb") as f:
             np.save(f, inv_freq_tensor.cpu().detach().numpy())

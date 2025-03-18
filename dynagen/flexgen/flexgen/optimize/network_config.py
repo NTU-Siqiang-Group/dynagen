@@ -135,19 +135,58 @@ class Llama13BConfig(ProfilerConfig):
     def get_hidden_size(self, batch_size, seq_len):
         return batch_size * seq_len * 5120 * 2
 
-    def get_gpu_home_prefill(self, weight_percent, batch_size, seq_len):
-        gpu_home_prefill = weight_percent * sum(self.get_weights()) + 2 * self.get_hidden_size(batch_size, seq_len)
-        return gpu_home_prefill
 
-    def get_gpu_work_prefill(self, weight_percent, batch_size, seq_len):
-        h1 = 5120
-        h2 = 13824
-        qkv = batch_size * 8 * seq_len * h1
-        embed = batch_size * 4 * seq_len * h1
-        mlp = batch_size * 2 * seq_len * (h1 + h2)
-        gpu_work_prefill = 2 * (1 - weight_percent) * (8 * h1 * h1 + 4 * h1 * h2) + max(qkv, embed, mlp)
-        return gpu_work_prefill
+class Llama70BConfig(ProfilerConfig):
+    def get_weights(self):
+        hidden_size = 8192
+        intermediate_size = 28672
+        vocab_size = 32000
+        self.num_hidden_layers = 80
+        dtype_bytes = 2
 
+        input_w_token_size = vocab_size * hidden_size * dtype_bytes
+        output_w_token_size = input_w_token_size
+
+        output_w_ln_size = hidden_size * dtype_bytes
+        mlp_w_ln_size = output_w_ln_size
+
+        mlp_w_g_size = intermediate_size * hidden_size * dtype_bytes
+        mlp_w_u_size = intermediate_size * hidden_size * dtype_bytes
+        mlp_w_d_size = hidden_size * intermediate_size * dtype_bytes
+
+        self.mlp_size = mlp_w_g_size + mlp_w_u_size + mlp_w_d_size + mlp_w_ln_size
+
+        attention_w_k_size = 1024 * hidden_size * dtype_bytes
+        attention_w_v_size = 1024 * hidden_size * dtype_bytes
+        attention_w_q_size = hidden_size * hidden_size * dtype_bytes
+        attention_w_o_size = hidden_size * hidden_size * dtype_bytes
+        attention_w_re_size = 64 * 4
+
+        self.attention_size = attention_w_k_size + attention_w_v_size + attention_w_q_size + attention_w_o_size + attention_w_re_size + output_w_ln_size
+
+        output_size = output_w_ln_size + output_w_token_size
+
+        weights = [input_w_token_size]
+        for _ in range(self.num_hidden_layers):
+            weights.append(self.attention_size)
+            weights.append(self.mlp_size)
+        weights.append(output_size)
+
+        return weights
+    
+    def get_mlp_size(self):
+        self.get_weights()
+        return self.mlp_size
+    
+    def get_attn_size(self):
+        self.get_weights()
+        return self.attention_size
+    
+    def get_cache_size(self, batch_size, seq_len):
+        return 2 * batch_size * seq_len * 8192 * 2
+    
+    def get_hidden_size(self, batch_size, seq_len):
+        return batch_size * seq_len * 8192 * 2
 
 class Opt13BConfig(ProfilerConfig):
     def get_weights(self):
@@ -200,10 +239,3 @@ class Opt13BConfig(ProfilerConfig):
 
     def get_hidden_size(self, batch_size, seq_len):
         return batch_size * seq_len * 5120 * 2
-
-
-config = Llama13BConfig()
-
-Batch_size = 16
-Seq_len = 1024
-print(config.get_gpu_home_prefill(0.8, Batch_size, Seq_len) + config.get_gpu_work_prefill(0.8, Batch_size, Seq_len))

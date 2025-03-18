@@ -6,24 +6,40 @@ from tqdm import tqdm
 
 from flexgen.computation_policy_interface import *
 from flexgen.optimize.dynagen_optimize import DynagenOptWorksetHeuristic
-from flexgen.optimize.network_config import ProfilerConfig, Llama13BConfig
+from flexgen.optimize.network_config import ProfilerConfig, Llama70BConfig
 from flexgen.timer import timers
 
 
+class FakeEvent:
+    def record(self, *args):
+        pass
+
+
 class MultiStreamBase:
-    def __init__(self, size):
+    def __init__(self, size, evaluate=False):
         self.size = size
         self.streams = [torch.cuda.Stream() for _ in range(size)]
+        self.profile = evaluate
+        if evaluate:
+            self.start_events = [torch.cuda.Event(enable_timing=True) for _ in range(size)]
+            self.end_events = [torch.cuda.Event(enable_timing=True) for _ in range(size)]
         self.executors = ThreadPoolExecutor(max_workers=size)
         self.execute_idx = 0
 
     def run(self, need_sync, func, *args):
         use_stream = self.streams[self.execute_idx]
+        if self.profile:
+            start = self.start_events[self.execute_idx]
+            end = self.end_events[self.execute_idx]
+        else:
+            start = end = FakeEvent()
         self.execute_idx = (self.execute_idx + 1) % self.size
 
         def _run_func():
             with torch.cuda.stream(use_stream):
+                start.record()
                 func(*args)
+                end.record()
             return use_stream if need_sync else None
 
         return self.executors.submit(_run_func)
@@ -56,7 +72,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
     def generation_loop_normal(self, this, evaluate):
         raise NotImplementedError()
 
-    def generation_loop_overlap_single_batch(self, this, evaluate, profile_dir):
+    def generation_loop_overlap_single_batch(self, this, evaluate):
         def load_layer_weight(i, j):
             this.load_weight(i, j, 0, overlap=False)
 
@@ -109,7 +125,13 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
 
             timers("generate").stop()
 
-    def generation_loop_overlap_multi_batch(self, this, profile_dir):
+    def generation_loop_overlap_multi_batch(self, this, evaluate):
+        if evaluate:
+            compute_start = torch.cuda.Event(enable_timing=True)
+            compute_end = torch.cuda.Event(enable_timing=True)
+        else:
+            compute_start = compute_end = FakeEvent()
+
         def load_layer_weight(i, j, k):
             this.load_weight(i, j, k, overlap=False)
 
@@ -117,6 +139,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.load_cache_dyn(i, j, k, load_to_cpu=load_to_cpu)
 
         def compute_layer(i, j, k, layers_weights_sync, layers_cache_sync, cpu_del):
+            compute_start.record()
             wait_stream_finish(layers_weights_sync[k][j])
             layers_weights_sync[k][j] = None
             if i != 0 and this.layers[j].need_cache:
@@ -126,6 +149,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.load_hidden(i, j, k + 1)
             this.compute_layer(i, j, k, cpu_delegation=cpu_del[(i, j, k)])
             this.store_cache(i, j, k - 1, overlap=False)
+            compute_end.record()
 
         optimizer = DynagenOptWorksetHeuristic(
           this.num_layers,
@@ -134,7 +158,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
           this.prompt_len,
           this.execute_gen_len,
           this.gpu_memory_capacity,
-          Llama13BConfig()
+          Llama70BConfig()
         )
         optimizer.optimize()
         cache_prefetch, weight_prefetch, cpu_delegation = optimizer.get_policy()
@@ -338,7 +362,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                 timers("generate").costs.append(this.num_layers * batch_cost)
 
         # Compute average cost for each step
-        profiler = Llama13BConfig()
+        profiler = Llama70BConfig()
         weight_sizes = profiler.get_weights()
 
         def get_compute_weight_size(c, weight_gpu_percent):

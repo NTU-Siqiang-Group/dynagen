@@ -55,7 +55,7 @@ class ComputationPolicyInterface:
     """
     raise NotImplementedError()
   
-  def generation_loop_overlap_multi_batch(self, this):
+  def generation_loop_overlap_multi_batch(self, this, evaluate):
     """
     Returns the number of batches to overlap in the generation loop
     """
