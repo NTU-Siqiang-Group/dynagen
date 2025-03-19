@@ -10,36 +10,21 @@ from flexgen.optimize.network_config import ProfilerConfig, Llama70BConfig
 from flexgen.timer import timers
 
 
-class FakeEvent:
-    def record(self, *args):
-        pass
-
-
 class MultiStreamBase:
     def __init__(self, size, evaluate=False):
         self.size = size
         self.streams = [torch.cuda.Stream() for _ in range(size)]
-        self.profile = evaluate
-        if evaluate:
-            self.start_events = [torch.cuda.Event(enable_timing=True) for _ in range(size)]
-            self.end_events = [torch.cuda.Event(enable_timing=True) for _ in range(size)]
+        self.evaluate = evaluate
         self.executors = ThreadPoolExecutor(max_workers=size)
         self.execute_idx = 0
 
     def run(self, need_sync, func, *args):
         use_stream = self.streams[self.execute_idx]
-        if self.profile:
-            start = self.start_events[self.execute_idx]
-            end = self.end_events[self.execute_idx]
-        else:
-            start = end = FakeEvent()
         self.execute_idx = (self.execute_idx + 1) % self.size
 
         def _run_func():
-            with torch.cuda.stream(use_stream):
-                start.record()
+            with torch.cuda.stream(use_stream), torch.cuda.nvtx.range(f"{func.__name__}{args}"):
                 func(*args)
-                end.record()
             return use_stream if need_sync else None
 
         return self.executors.submit(_run_func)
@@ -120,18 +105,12 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                         layers_cache_sync[layer] = f
 
                 compute_layer(i, j, layers_weights_sync, layers_cache_sync)
-                if i == 0:
-                    this.sync()
+            if i == 0:
+                this.sync()
 
             timers("generate").stop()
 
     def generation_loop_overlap_multi_batch(self, this, evaluate):
-        if evaluate:
-            compute_start = torch.cuda.Event(enable_timing=True)
-            compute_end = torch.cuda.Event(enable_timing=True)
-        else:
-            compute_start = compute_end = FakeEvent()
-
         def load_layer_weight(i, j, k):
             this.load_weight(i, j, k, overlap=False)
 
@@ -139,17 +118,19 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.load_cache_dyn(i, j, k, load_to_cpu=load_to_cpu)
 
         def compute_layer(i, j, k, layers_weights_sync, layers_cache_sync, cpu_del):
-            compute_start.record()
+            torch.cuda.nvtx.range_push(f"Sync {i}, {j}, {k}")
             wait_stream_finish(layers_weights_sync[k][j])
             layers_weights_sync[k][j] = None
             if i != 0 and this.layers[j].need_cache:
                 wait_stream_finish(layers_cache_sync[k][j])
             layers_cache_sync[k][j] = None
+            torch.cuda.nvtx.range_pop()
+            torch.cuda.nvtx.range_push(f"Compute {i}, {j}, {k}")
             this.store_hidden(i, j, k - 1)
             this.load_hidden(i, j, k + 1)
             this.compute_layer(i, j, k, cpu_delegation=cpu_del[(i, j, k)])
             this.store_cache(i, j, k - 1, overlap=False)
-            compute_end.record()
+            torch.cuda.nvtx.range_pop()
 
         optimizer = DynagenOptWorksetHeuristic(
           this.num_layers,
@@ -177,6 +158,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
 
             for j in range(this.num_layers):
                 for k in range(this.num_gpu_batches):
+                    torch.cuda.nvtx.range_push(f"Token {i}, Layer {j}, Batch {k}")
                     cache_prefetches = []
                     if (i, j, k) in cache_prefetch:
                         cache_prefetches = cache_prefetch[(i, j, k)]
@@ -198,10 +180,10 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                         layers_cache_sync,
                         cpu_delegation
                     )
-
-                    if i == 0:
-                        this.sync()
-
+                    torch.cuda.nvtx.range_pop()
+            
+            if i == 0:
+                this.sync()
             timers("generate").stop()
 
     def generation_loop_debug_multi_batch(self, this):
