@@ -118,7 +118,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.load_cache_dyn(i, j, k, load_to_cpu=load_to_cpu)
 
         def compute_layer(i, j, k, layers_weights_sync, layers_cache_sync, cpu_del):
-            torch.cuda.nvtx.range_push(f"Sync {i}, {j}, {k}")
+            torch.cuda.nvtx.range_push(f"Pre-compute Sync {i}, {j}, {k}")
             wait_stream_finish(layers_weights_sync[k][j])
             layers_weights_sync[k][j] = None
             if i != 0 and this.layers[j].need_cache:
@@ -130,6 +130,9 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.load_hidden(i, j, k + 1)
             this.compute_layer(i, j, k, cpu_delegation=cpu_del[(i, j, k)])
             this.store_cache(i, j, k - 1, overlap=False)
+            torch.cuda.nvtx.range_pop()
+            torch.cuda.nvtx.range_push(f"Post-compute Sync {i}, {j}, {k}")
+            this.sync()
             torch.cuda.nvtx.range_pop()
 
         optimizer = DynagenOptWorksetHeuristic(

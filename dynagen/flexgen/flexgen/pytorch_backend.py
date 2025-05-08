@@ -110,7 +110,6 @@ class TorchTensor:
         if self.device and self.device.device_type == DeviceType.DISK:
             self.device.delete(self)
         self.device = self.data = None
-        torch.cuda.empty_cache()
 
     def load_from_np(self, np_array):
         if self.device.device_type == DeviceType.DISK:
@@ -287,9 +286,6 @@ class TorchDevice:
         # output embedding
         logits = F.linear(hidden, w_token.data)
         last_token_logits = logits[:, -1, :]
-
-        if evaluate:
-            return TorchTensor.create_from_torch(logits, self)
 
         if do_sample and not temperature < 1e-5:
             probs = torch.softmax(last_token_logits / temperature, dim=-1)

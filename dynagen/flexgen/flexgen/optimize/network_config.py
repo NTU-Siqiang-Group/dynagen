@@ -1,9 +1,10 @@
 class ProfilerConfig:
-    htod_cost = 2e-11
-    dtoh_cost = 2e-11
-    compute_cache_gpu = 5e-3
-    compute_cache_cpu = 6e-3
-    compute_mlp_gpu = 1e-4
+    htod_cost = 1.16e-11
+    dtoh_cost = 9.75e-10
+    prefill_batch = 1e-3
+    compute_cache_gpu = 2e-3
+    compute_cache_cpu = 2e-3
+    compute_mlp_gpu = 9e-4
 
     def get_cache_size(self, batch_size, seq_len):
         raise NotImplementedError()
