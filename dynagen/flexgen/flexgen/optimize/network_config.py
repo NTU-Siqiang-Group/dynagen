@@ -1,10 +1,39 @@
+import json
+
+
 class ProfilerConfig:
-    htod_cost = 1.16e-11
-    dtoh_cost = 9.75e-10
+    htod_cost = 1.09e-11
+    dtoh_cost = 6.17e-10
     prefill_batch = 1e-3
     compute_cache_gpu = 2e-3
     compute_cache_cpu = 2e-3
     compute_mlp_gpu = 9e-4
+
+    @classmethod
+    def save(cls, path):
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "htod_cost": cls.htod_cost,
+                    "dtoh_cost": cls.dtoh_cost,
+                    "prefill_batch": cls.prefill_batch,
+                    "compute_cache_gpu": cls.compute_cache_gpu,
+                    "compute_cache_cpu": cls.compute_cache_cpu,
+                    "compute_mlp_gpu": cls.compute_mlp_gpu,
+                },
+                f,
+            )
+
+    @classmethod
+    def load(cls, path):
+        with open(path, "r") as f:
+            config = json.load(f)
+            cls.htod_cost = config["htod_cost"]
+            cls.dtoh_cost = config["dtoh_cost"]
+            cls.prefill_batch = config["prefill_batch"]
+            cls.compute_cache_gpu = config["compute_cache_gpu"]
+            cls.compute_cache_cpu = config["compute_cache_cpu"]
+            cls.compute_mlp_gpu = config["compute_mlp_gpu"]
 
     def get_cache_size(self, batch_size, seq_len):
         raise NotImplementedError()

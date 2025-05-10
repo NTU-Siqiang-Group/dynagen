@@ -1,12 +1,14 @@
 from concurrent.futures import ThreadPoolExecutor
+import os
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from flexgen.computation_policy_interface import *
-from flexgen.optimize.dynagen_optimize import DynagenOptWorksetHeuristic
-from flexgen.optimize.network_config import ProfilerConfig, Llama70BConfig
+from flexgen.optimize.dynagen_optimize import DynagenOptWorksetHeuristic, DynagenOptOverlappingHeuristic
+from flexgen.optimize.network_config import ProfilerConfig, Llama13BConfig
+from flexgen.optimize.network_profiler import NetworkProfiler
 from flexgen.timer import timers
 
 
@@ -135,16 +137,17 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.sync()
             torch.cuda.nvtx.range_pop()
 
-        optimizer = DynagenOptWorksetHeuristic(
+        optimizer = DynagenOptOverlappingHeuristic(
           this.num_layers,
           this.policy.gpu_batch_size,
           this.num_gpu_batches,
           this.prompt_len,
           this.execute_gen_len,
           this.gpu_memory_capacity,
-          Llama70BConfig()
+          Llama13BConfig(),
+          cost_tolerance=10.0,
         )
-        optimizer.optimize()
+        wg, cg = optimizer.optimize()
         cache_prefetch, weight_prefetch, cpu_delegation = optimizer.get_policy()
 
         layers_weights_sync = [[None for _ in range(this.num_layers)] for _ in range(this.num_gpu_batches)]
@@ -190,6 +193,14 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             timers("generate").stop()
 
     def generation_loop_debug_multi_batch(self, this):
+        dir = os.path.dirname(os.path.realpath(__file__))
+        profiler_config_path = os.path.join(dir, "optimize",
+            f"profiler_config_{this.config.name}_gbs{this.policy.gpu_batch_size}_ngbs{this.num_gpu_batches}.json"
+        )
+        if os.path.exists(profiler_config_path):
+            ProfilerConfig.load(profiler_config_path)
+            return
+
         def is_attn_layer(j):
             return j % 2 == 1 and j != this.num_layers - 1
 
@@ -224,6 +235,8 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
         load_cache_steps = set()
         store_cache_steps = set()
 
+        prefill_batch_start = torch.cuda.Event(enable_timing=True)
+        prefill_batch_end = torch.cuda.Event(enable_timing=True)
         load_weight_start = torch.cuda.Event(enable_timing=True)
         load_weight_end = torch.cuda.Event(enable_timing=True)
         load_cache_start = torch.cuda.Event(enable_timing=True)
@@ -240,6 +253,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
         n = this.execute_gen_len * this.num_layers * this.num_gpu_batches
         pbar = tqdm(total=n)
         timers("prefill").reset()
+        timers("prefill_batch").reset()
         timers("decoding_gpu_batch").reset()
 
         # Prologue
@@ -271,6 +285,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                     this.load_cache_dyn(i, j, k + 1, load_to_cpu=cpu_del, overlap=True)
                     load_cache_end.record(stream=this.load_cache_stream)
 
+                    prefill_batch_start.record()
                     store_hidden_start.record()
                     this.store_hidden(i, j, k - 1)
                     store_hidden_end.record()
@@ -286,8 +301,14 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                     store_cache_start.record(stream=this.store_cache_stream)
                     this.store_cache(i, j, k - 1)
                     store_cache_end.record(stream=this.store_cache_stream)
+                    prefill_batch_end.record()
 
                     this.sync()
+
+                    if i == 0:
+                        timers("prefill_batch").costs.append(
+                            prefill_batch_start.elapsed_time(prefill_batch_end) / 1000
+                        )
 
                     if is_valid_step(i, j + 1, k):
                         load_weight_steps.add(c)
@@ -347,7 +368,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                 timers("generate").costs.append(this.num_layers * batch_cost)
 
         # Compute average cost for each step
-        profiler = Llama70BConfig()
+        profiler = Llama13BConfig()
         weight_sizes = profiler.get_weights()
 
         def get_compute_weight_size(c, weight_gpu_percent):
@@ -364,12 +385,12 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
         timers("dtoh").reset()
         w = lc = sc = k = 0
         for cur_idx in range(1, n + 1):
-            if cur_idx in load_weight_steps:
+            if cur_idx in load_weight_steps and this.policy.w_gpu_percent != 100:
                 timers("htod").costs.append(
                     timers("load_weight").costs[w] / get_compute_weight_size(cur_idx + this.num_gpu_batches, this.policy.w_gpu_percent)
                 )
                 w += 1
-            if cur_idx in load_cache_steps:
+            if cur_idx in load_cache_steps and this.policy.cache_gpu_percent != 100:
                 timers("htod").costs.append(
                     timers("load_cache").costs[lc] / get_compute_cache_size(cur_idx + 1, this.policy.cache_gpu_percent)
                 )
@@ -379,7 +400,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
                     timers("dtoh").costs.append(
                         timers("store_cache").costs[sc] / profiler.get_cache_size(this.policy.gpu_batch_size, 1)
                     )
-                else:
+                elif this.policy.cache_gpu_percent != 100:
                     timers("dtoh").costs.append(
                         timers("store_cache").costs[sc] / get_compute_cache_size(cur_idx - 1, this.policy.cache_gpu_percent)
                     )
@@ -388,10 +409,14 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             if k >= this.num_gpu_batches:
                 k = 0
 
-        ProfilerConfig.htod_cost = timers("htod").elapsed()
-        ProfilerConfig.dtoh_cost = timers("dtoh").elapsed()
-        ProfilerConfig.compute_cache_gpu = timers("compute_cache_gpu").elapsed()
-        ProfilerConfig.compute_cache_cpu = timers("compute_cache_cpu").elapsed()
-        ProfilerConfig.compute_mlp_gpu = timers("compute_mlp").elapsed()
+        NetworkProfiler(
+            htod_cost=timers("htod").costs,
+            dtoh_cost=timers("dtoh").costs,
+            prefill_batch=timers("prefill_batch").costs,
+            compute_cache_gpu=timers("compute_cache_gpu").costs,
+            compute_cache_cpu=timers("compute_cache_cpu").costs,
+            compute_mlp_gpu=timers("compute_mlp").costs
+        )()
 
+        ProfilerConfig.save(profiler_config_path)
         # TODO: load_hidden and store_hidden

@@ -46,7 +46,8 @@ from flexgen.utils import (
 fix_recursive_import()
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
-auto_pop = False
+auto_pop = True
+BLS = 0
 
 
 class LlamaInputEmbed(InputEmbed):
@@ -508,7 +509,7 @@ def run_flexgen(args):
 
         if args.computation_policy == "optimize" and args.num_gpu_batches > 1:
             print("profiling - generate")
-            model.generate(warmup_inputs, max_new_tokens=2, debug_mode="fewer_batch", verbose=args.verbose, evaluate=args.evaluate)    
+            model.generate(warmup_inputs, max_new_tokens=2, debug_mode="fewer_batch", verbose=args.verbose, evaluate=args.evaluate)
 
         print("benchmark - generate")
         timers("generate").reset()
@@ -640,7 +641,6 @@ if __name__ == "__main__":
         or (args.computation_policy == "alter_stream" and args.num_gpu_batches == 1)
         or args.computation_policy == "optimize"
     )
-    BLS = 0
     if not args.computation_policy == "default":
         BLS = args.num_gpu_batches * args.gpu_batch_size
     assert len(args.percent) == 6

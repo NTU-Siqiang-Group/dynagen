@@ -60,8 +60,6 @@ class DynagenOptWorksetHeuristic:
 
     def get_compute_cache_size(self, c, cache_gpu_percent):
         i = (c - 1) // (self.num_layers * self.num_gpu_batches)
-        # if i == 0:
-        #     return 0
         return self.profiler.get_cache_size(self.batch_size, self.prompt_len + i) * (100 - cache_gpu_percent) // 100
 
     def get_remaining_size(self, mem_consumption):
@@ -109,6 +107,9 @@ class DynagenOptWorksetHeuristic:
         mem_consumption = np.sum(self.weight_sizes[1:], dtype=np.uint64) * weight_percent // 100 + self.weight_sizes[0]
         mem_consumption += self.profiler.get_cache_size(self.num_gpu_batches * self.batch_size, self.prompt_len + self.gen_len) * self.profiler.num_hidden_layers * cache_percent // 100
         mem_consumption = int(mem_consumption)
+        assert mem_consumption <= self.gpu_memory_capacity, (
+            "memory consumption should be less than gpu memory capacity"
+        )
         remaining_sizes = QOBTree()
 
         weight_prefetched = np.zeros(self.n + 1, bool)
@@ -290,3 +291,235 @@ class DynagenOptWorksetHeuristic:
             costs[cur_idx] += compute_time
 
         return np.sum(costs)
+
+
+class DynagenOptOverlappingHeuristic(DynagenOptWorksetHeuristic):
+    def __init__(
+        self,
+        num_layers,
+        batch_size,
+        num_gpu_batches,
+        prompt_len,
+        gen_len,
+        gpu_memory_capacity,
+        profiler=ProfilerConfig(),
+        max_num_prefetch_batches=0,
+        cost_tolerance=1.0,
+    ):
+        super().__init__(
+            num_layers,
+            batch_size,
+            num_gpu_batches,
+            prompt_len,
+            gen_len,
+            gpu_memory_capacity,
+            profiler,
+            max_num_prefetch_batches,
+        )
+        self.cost_tolerance = cost_tolerance
+
+    def get_compute_cache_size(self, c, cache_gpu_percent):
+        j = ((c - 1) % (self.num_layers * self.num_gpu_batches)) // self.num_gpu_batches
+        if j == 0 or j == self.num_layers - 1 or j % 2 == 0:
+            return 0
+        i = (c - 1) // (self.num_layers * self.num_gpu_batches)
+        return self.profiler.get_cache_size(self.batch_size, self.prompt_len + i) * (100 - cache_gpu_percent) // 100
+
+    def is_cache_offload_valid(self, c, cpu_del):
+        j = ((c - 1) % (self.num_layers * self.num_gpu_batches)) // self.num_gpu_batches
+        return j % 2 == 1 and j != self.num_layers - 1 and cpu_del[c] == 0
+
+    def get_compute_cost(self, c, cpu_del):
+        i = (c - 1) // (self.num_layers * self.num_gpu_batches)
+        if i == 0:
+            return self.profiler.prefill_batch
+        j = ((c - 1) % (self.num_layers * self.num_gpu_batches)) // self.num_gpu_batches
+        if j == 0 or j == self.num_layers - 1:
+            return 0
+        if j % 2 == 0:
+            return self.profiler.compute_mlp_gpu
+        elif not cpu_del[c]:
+            return self.profiler.compute_cache_gpu
+        else:
+            return self.profiler.compute_cache_cpu
+    
+    def get_weight_cost(self, c, weight_percent):
+        i = (c - 1) // (self.num_layers * self.num_gpu_batches)
+        if i == 0:
+            return 0
+        return self.profiler.get_htod_cost(self.get_compute_weight_size(c, weight_percent))
+    
+    def get_cache_cost(self, c, cache_percent):
+        j = ((c - 1) % (self.num_layers * self.num_gpu_batches)) // self.num_gpu_batches
+        if j == 0 or j == self.num_layers - 1:
+            return 0
+        return self.profiler.get_htod_cost(self.get_compute_cache_size(c, cache_percent))
+
+    def optimize_policy(self, position=0, weight_percent=0, cache_percent=0):
+        assert type(weight_percent) is int and 0 <= weight_percent <= 100
+        assert type(cache_percent) is int and 0 <= cache_percent <= 100
+
+        def get_first_step_remaining(r, c, is_weight):
+            min_io_cost_key, min_io_cost = None, float("inf")
+            iterator = remaining_sizes.iterkeys(min=r, max=self.gpu_memory_capacity)
+            for key in iterator:
+                p, _, io_cost = remaining_sizes[key]
+                if is_weight and c - p < self.num_layers * self.num_gpu_batches - 1:
+                    if io_cost < min_io_cost:
+                        min_io_cost = io_cost
+                        min_io_cost_key = key
+                if not is_weight and c - p < self.num_layers * self.num_gpu_batches:
+                    if io_cost < min_io_cost:
+                        min_io_cost = io_cost
+                        min_io_cost_key = key
+            if min_io_cost_key is None:
+                return ValueError("No step is found with sufficient remaining VRAM")
+            return remaining_sizes[min_io_cost_key]
+
+
+        weight_prefetch = np.zeros(self.n + 1, np.int64)
+        cache_prefetch = np.zeros(self.n + 1, np.int64)
+        cpu_del = np.zeros(self.n + 1, np.int32)
+
+        # FIXME: cache_percent always = 100
+        mem_consumption = np.sum(self.weight_sizes[1:], dtype=np.uint64) * weight_percent // 100 + self.weight_sizes[0]
+        mem_consumption += self.profiler.get_cache_size(self.num_gpu_batches * self.batch_size, self.prompt_len + self.gen_len) * self.profiler.num_hidden_layers * cache_percent // 100
+        mem_consumption = int(mem_consumption)
+        assert mem_consumption <= self.gpu_memory_capacity, (
+            "memory consumption should be less than gpu memory capacity"
+        )
+        remaining_sizes = QOBTree()
+
+        weight_prefetched = np.zeros(self.n + 1, bool)
+        weight_prefetched[: self.num_gpu_batches + 1] = True
+        cache_prefetched = np.zeros(self.n + 1, bool)
+        for i in range(1, self.n + 1):
+            if not self.need_cache(i):
+                cache_prefetched[i] = True
+
+        i, p, prev = 1, 1, 1
+        with tqdm(total=self.n, position=position, desc="Optimizing", leave=False) as progress:
+            while i < self.n:
+                io_cost = 0
+                compute_cost = self.get_compute_cost(i, cpu_del)
+                prefetch_range = self.prefetch_range(p)
+                for p in prefetch_range:
+                    weight_size = self.get_compute_weight_size(p, weight_percent)
+                    cost = self.get_weight_cost(p, weight_percent)
+                    if not weight_prefetched[p]:
+                        if (
+                            mem_consumption + weight_size > self.gpu_memory_capacity
+                            or io_cost + cost > compute_cost * (1 + self.cost_tolerance)
+                        ):
+                            break
+                        mem_consumption += weight_size
+                        io_cost += cost
+                        weight_prefetched[p : p + self.num_gpu_batches] = True
+                        weight_prefetch[p] = i
+                    if (p - 1) // (self.num_layers * self.num_gpu_batches) == 0:
+                        cost = self.get_cache_cost(p, 0)
+                    else:
+                        cost = self.get_cache_cost(p, cache_percent)
+                    cache_size = self.get_compute_cache_size(p, cache_percent)
+                    if not cache_prefetched[p]:
+                        if (
+                            mem_consumption + cache_size > self.gpu_memory_capacity
+                            or io_cost + cost > compute_cost * (1 + self.cost_tolerance)
+                        ):
+                            break
+                        mem_consumption += cache_size
+                        io_cost += cost
+                        cache_prefetched[p] = True
+                        cache_prefetch[p] = i
+                remaining_sizes.clear()
+                for c in range(i, prefetch_range.stop):
+                    if i != c:
+                        if self.is_weight_offload_valid(c) and weight_prefetched[c]:
+                            mem_consumption -= self.get_compute_weight_size(c - 1, weight_percent)
+                            assert mem_consumption >= 0
+                            r = self.get_remaining_size(mem_consumption)
+                            if r not in remaining_sizes:
+                                remaining_sizes[r] = (c, mem_consumption, io_cost)
+                        if self.is_cache_offload_valid(c, cpu_del) and cache_prefetched[c]:
+                            if self._decode(i - 1)[0] == self.gen_len - 1:
+                                mem_consumption -= self.get_compute_cache_size(i - 1, 0)
+                            else:
+                                mem_consumption -= self.get_compute_cache_size(i - 1, cache_percent)
+                            assert mem_consumption >= 0
+                            r = self.get_remaining_size(mem_consumption)
+                            if r not in remaining_sizes:
+                                remaining_sizes[r] = (c, mem_consumption, io_cost)
+                    if not weight_prefetched[c]:
+                        assert i != c, (
+                            "weight for the current computing step should not be prefetched in the same step"
+                        )
+                        weight_size = self.get_compute_weight_size(c, weight_percent)
+                        i, mem_consumption, io_cost = get_first_step_remaining(weight_size, c, True)
+                        break
+                    if not cache_prefetched[c]:
+                        if i == c:
+                            cpu_del[c] = 1
+                            cache_prefetched[c] = True
+                        else:
+                            cache_size = self.get_compute_cache_size(c, cache_percent)
+                            i, mem_consumption, io_cost = get_first_step_remaining(cache_size, c, False)
+                        break
+                if c == prefetch_range.stop - 1:
+                    i = c
+                    mem_consumption = self.get_compute_weight_size(i, weight_percent) + (
+                        self.get_compute_cache_size(i, cache_percent) if self.need_cache(i) else 0
+                    )
+                    assert mem_consumption <= self.gpu_memory_capacity
+                progress.update(i - prev)
+                prev = i
+            progress.update(1)
+
+
+        # for i in tqdm(range(1, self.n + 1), position=position, desc="Optimizing", leave=False):
+        #     io_cost = 0
+        #     compute_cost = self.get_compute_cost(i, cpu_del)
+        #     prefetch_range = self.prefetch_range(p)
+        #     for p in prefetch_range:
+        #         weight_size = self.get_compute_weight_size(p, weight_percent)
+        #         cost = self.get_weight_cost(p, weight_percent)
+        #         if not weight_prefetched[p]:
+        #             if (
+        #                 mem_consumption + weight_size > self.gpu_memory_capacity
+        #                 or io_cost + cost > compute_cost * (1 + self.cost_tolerance)
+        #             ):
+        #                 break
+        #             mem_consumption += weight_size
+        #             io_cost += cost
+        #             weight_prefetched[p : p + self.num_gpu_batches] = True
+        #             weight_prefetch[p] = i
+        #         if (p - 1) // (self.num_layers * self.num_gpu_batches) == 0:
+        #             cache_size = self.get_compute_cache_size(p, 0)
+        #         else:
+        #             cache_size = self.get_compute_cache_size(p, cache_percent)
+        #         cost = self.get_cache_cost(p, cache_percent)
+        #         if not cache_prefetched[p]:
+        #             if (
+        #                 mem_consumption + cache_size > self.gpu_memory_capacity
+        #                 or io_cost + cost > compute_cost * (1 + self.cost_tolerance)
+        #             ):
+        #                 break
+        #             mem_consumption += cache_size
+        #             io_cost += cost
+        #             cache_prefetched[p] = True
+        #             cache_prefetch[p] = i
+        #     assert weight_prefetched[i], (
+        #         "weight for the current computing step should not be prefetched in the same step"
+        #     )
+        #     if self.is_weight_offload_valid(i):
+        #         mem_consumption -= self.get_compute_weight_size(i - 1, weight_percent)
+        #     if not cache_prefetched[i]:
+        #         cpu_del[i] = 1
+        #         cache_prefetched[i] = True
+        #     if self.is_cache_offload_valid(i, cpu_del):
+        #         if self._decode(i - 1)[0] == self.gen_len - 1:
+        #             mem_consumption -= self.get_compute_cache_size(i - 1, 0)
+        #         else:
+        #             mem_consumption -= self.get_compute_cache_size(i - 1, cache_percent)
+
+        cost = self.get_cost_from_policy(cache_prefetch, weight_prefetch, cpu_del, weight_percent, cache_percent)
+        return cost, cache_prefetch, weight_prefetch, cpu_del
