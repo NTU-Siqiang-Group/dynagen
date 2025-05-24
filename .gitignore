@@ -8,3 +8,7 @@ accuracy/transformers/
 *.egg-info/
 test*.py
 logs/
+*.csv
+*.png
+profiler_config*.json
+*.nsys-rep

@@ -1,27 +1,47 @@
-from dynagen_optimize import DynagenOptWorksetHeuristic
-from network_config import Opt13BConfig, Llama13BConfig
+import multiprocessing as mp
+from functools import partial
+import sys
 
-def summarize_policy(gen_len, num_layers, num_batches, opt):
-    cache, weight, cpu_del = opt.get_policy()
-    mem_consumption = opt.get_mem_consumption_full(
-        opt.cache_prefetch, opt.weight_prefetch, opt.cpu_delegation, opt.weight_percent, opt.cache_percent
-    )
-    print('token|layer|batch|fetch_cache|fetch_weight|use_cpu_del|memory(MB)')
-    idx = 0
-    for i in range(gen_len):
-        for j in range(num_layers):
-            for k in range(num_batches):
-                fetch_cache = 'No'
-                if (i, j, k) in cache:
-                    fetch_cache = cache[(i, j, k)]
-                fetch_weight= 'No'
-                if (i, j, k) in weight:
-                    fetch_weight = weight[(i, j, k)]
-                print(f'{i}|{j}|{k}|{fetch_cache}|{fetch_weight}|{cpu_del[(i, j, k)]}|{mem_consumption[idx] / (1<<20)}')
-                idx += 1
+from dynagen_optimize import DynagenOptOverlappingHeuristic, DynagenOptWorksetHeuristic
+from network_config import Llama13BConfig, Llama70BConfig
+
+gpu_mem = 8
+prompt_len = 1024
+gen_len = 64
+gbs = 4
+b = 4
+tol = 15
+
+def process(profiler, position, weight_percent, cache_percent):
+    try:
+        opt = DynagenOptOverlappingHeuristic(len(profiler.get_weights()), gbs, b, prompt_len, gen_len, gpu_mem, profiler, cost_tolerance=float(tol))
+        # opt = DynagenOptWorksetHeuristic(len(profiler.get_weights()), gbs, b, prompt_len, gen_len, gpu_mem, profiler)
+        cost, *policy = opt.optimize_policy(weight_percent=weight_percent, cache_percent=cache_percent, position=position)
+        return weight_percent, cache_percent, cost
+    except Exception as e:
+        # print(e)
+        return None
 
 if __name__ == "__main__":
-    llama_config = Llama13BConfig()
-    opt = DynagenOptWorksetHeuristic(len(llama_config.get_weights()), 8, 8, 1024, 64, 20, llama_config)
-    wg, cg = opt.optimize()
-    print(f"Optimized weight_gpu_percent: {wg}, cache_gpu_percent: {cg}")
+    with open(f'dynagen_optimize_overlapping_70b_{gpu_mem}g_{tol}xtol_test_output.csv', 'w') as f:
+    # with open(f'dynagen_optimize_workset_70b_{gpu_mem}g_test_output.csv', 'w') as f:
+        f.write("Weight percent,Cache percent,Cost\n")
+        llama_config = Llama70BConfig()
+        percents = [(w, c) for w in range(100, -1, -1) for c in range(100, -1, -1)]
+
+        if 'pydevd' in sys.modules:
+            num_processes = 1
+        else:
+            num_processes = 16
+        worker_func = partial(process, llama_config)
+
+        with mp.Pool(processes=num_processes) as pool:
+            tasks = [((i % num_processes) + 1, w, c) for i, (w, c) in enumerate(percents)]
+            results = pool.starmap(worker_func, tasks)
+
+            for result in results:
+                if result is not None:
+                    weight_percent, cache_percent, cost = result
+                    # print(f"wg = {weight_percent}%, cg = {cache_percent}%")
+                    f.write(f"{weight_percent},{cache_percent},{cost}\n")
+                    f.flush()
