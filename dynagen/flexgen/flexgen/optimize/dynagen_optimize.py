@@ -183,10 +183,17 @@ class DynagenOptWorksetHeuristic:
         cpu_delegation = {}
         i, j, k = 0, 0, 0
         for c in range(1, self.n + 1):
-            if self.cache_prefetch[c] != 0 and self.need_cache(c):
-                cache_prefetch_dict.setdefault(
-                    self._decode(self.cache_prefetch[c] - 1), []
-                ).append((i, j, k))
+            if self.need_cache(c):
+                if self.cache_prefetch[c] != 0:
+                    cache_prefetch_dict.setdefault(
+                        self._decode(self.cache_prefetch[c] - 1), []
+                    ).append((i, j, k))
+                elif self.cpu_del[c]:
+                    cache_prefetch_dict.setdefault((i, j, k), []).append((i, j, k))
+                else:
+                    raise ValueError(
+                        f"Cache prefetch for step {c} is not set, but it is needed."
+                    )
             if self.weight_prefetch[c] != 0 and self.need_weight(c):
                 assert k == 0
                 for batch in range(self.num_gpu_batches):
@@ -551,7 +558,6 @@ class DynagenOptRelaxedOverlappingHeuristic(DynagenOptOverlappingHeuristic):
                             except StopIteration:
                                 cpu_del[c] = 1
                                 cache_prefetched[c] = True
-                                i += 1
                         break
                 if c == prefetch_range.stop - 1:
                     i = c
