@@ -365,6 +365,7 @@ class LlamaLM(OptLM):
         self.num_prefetch_weight_layers = args.num_prefetch_weight_layers
         self.num_prefetch_cache_batches = args.num_prefetch_cache_batches
         self.gpu_memory_capacity = args.gpu_mem
+        self.cost_tolerance = args.tolerance
 
         layers = []
         layers.append(LlamaInputEmbed(self.config, self.env, self.policy))
@@ -629,6 +630,7 @@ def add_parser_arguments(parser):
                         help="Number of prefetched cache batches (required if --computation-policy is 'optimize').")
     parser.add_argument("--gpu-mem", type=float, default=None, help="GPU memory capacity in GiB.")
     parser.add_argument("--evaluate", action="store_true", default=False)
+    parser.add_argument("--tolerance", type=float, default=1.0, help="Tolerance for how many times to computation costs")
 
 
 if __name__ == "__main__":

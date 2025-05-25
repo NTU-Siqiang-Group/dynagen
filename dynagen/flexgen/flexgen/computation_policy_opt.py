@@ -6,7 +6,7 @@ import torch
 from tqdm import tqdm
 
 from flexgen.computation_policy_interface import *
-from flexgen.optimize.dynagen_optimize import DynagenOptWorksetHeuristic, DynagenOptOverlappingHeuristic
+from flexgen.optimize.dynagen_optimize import DynagenOptWorksetHeuristic, DynagenOptOverlappingHeuristic, DynagenOptRelaxedOverlappingHeuristic
 from flexgen.optimize.network_config import ProfilerConfig, Llama13BConfig
 from flexgen.optimize.network_profiler import NetworkProfiler
 from flexgen.timer import timers
@@ -137,7 +137,7 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
             this.sync()
             torch.cuda.nvtx.range_pop()
 
-        optimizer = DynagenOptOverlappingHeuristic(
+        optimizer = DynagenOptRelaxedOverlappingHeuristic(
           this.num_layers,
           this.policy.gpu_batch_size,
           this.num_gpu_batches,
@@ -145,9 +145,9 @@ class ComputationPolicyOptimize(ComputationPolicyInterface):
           this.execute_gen_len,
           this.gpu_memory_capacity,
           Llama13BConfig(),
-          cost_tolerance=10.0,
+          cost_tolerance=this.cost_tolerance,
         )
-        wg, cg = optimizer.optimize()
+        assert optimizer.optimize() is not None, "Optimization failed"
         cache_prefetch, weight_prefetch, cpu_delegation = optimizer.get_policy()
 
         layers_weights_sync = [[None for _ in range(this.num_layers)] for _ in range(this.num_gpu_batches)]
