@@ -75,7 +75,7 @@ class DynagenOptWorksetHeuristic:
     
     def optimize(self):
         min_cost = float('inf')
-        percents = [(w, c) for w in range(100, -1, -10) for c in range(100, -1, -10)]
+        percents = [(w, c) for c in range(100, -1, -10) for w in range(100, -1, -10)]
         for weight_percent, cache_percent in percents:
             try:
                 cost, *policy = self.optimize_policy(weight_percent=weight_percent, cache_percent=cache_percent)
